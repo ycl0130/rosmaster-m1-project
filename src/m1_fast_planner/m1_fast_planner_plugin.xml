@@ -1,0 +1,10 @@
+<library path="m1_fast_planner">
+  <class
+    name="m1_fast_planner::Fast2DPlanner"
+    type="m1_fast_planner::Fast2DPlanner"
+    base_class_type="nav2_core::GlobalPlanner">
+    <description>
+      Phase 1A collision-checked straight-line GlobalPlanner smoke plugin.
+    </description>
+  </class>
+</library>

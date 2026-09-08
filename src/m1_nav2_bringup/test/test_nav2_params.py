@@ -3,6 +3,7 @@
 import importlib.util
 from pathlib import Path
 
+import pytest
 import yaml
 from launch import LaunchContext
 from launch.actions import IncludeLaunchDescription
@@ -162,6 +163,7 @@ def test_scope_enabled_drives_predictor_and_only_the_local_scope_layer(
             "namespace": "",
             "params_file": str(PARAMS),
             "scope_enabled": enabled,
+            "planner_mode": "navfn",
             "use_sim_time": "true",
         })
         configured = launch_module._configured_nav2_params(
@@ -169,6 +171,7 @@ def test_scope_enabled_drives_predictor_and_only_the_local_scope_layer(
             LaunchConfiguration("namespace"),
             LaunchConfiguration("use_sim_time"),
             LaunchConfiguration("scope_enabled"),
+            LaunchConfiguration("planner_mode"),
         )
         rewritten_path = configured.evaluate(context)
         rewritten = yaml.safe_load(rewritten_path.read_text())
@@ -186,6 +189,9 @@ def test_scope_enabled_drives_predictor_and_only_the_local_scope_layer(
         expected["local_costmap"]["local_costmap"]["ros__parameters"][
             "scope_layer"
         ]["enabled"] = enabled == "true"
+        expected["planner_server"]["ros__parameters"]["GridBased"][
+            "plugin"
+        ] = "nav2_navfn_planner/NavfnPlanner"
         for node in expected.values():
             if isinstance(node, dict) and "ros__parameters" in node:
                 node["ros__parameters"]["use_sim_time"] = True
@@ -201,6 +207,67 @@ def test_scope_enabled_drives_predictor_and_only_the_local_scope_layer(
     assert original["local_costmap"]["local_costmap"]["ros__parameters"][
         "scope_layer"
     ]["enabled"] is False
+
+
+def test_planner_mode_rewrites_only_gridbased_plugin(monkeypatch, tmp_path):
+    monkeypatch.setenv("ROS_LOG_DIR", str(tmp_path / "ros-log"))
+    launch_module = load_gazebo_launch_module()
+    original = yaml.safe_load(PARAMS.read_text())
+    for mode, plugin in (
+        ("navfn", "nav2_navfn_planner/NavfnPlanner"),
+        ("fast2d", "m1_fast_planner::Fast2DPlanner"),
+    ):
+        context = LaunchContext()
+        context.launch_configurations.update({
+            "namespace": "",
+            "params_file": str(PARAMS),
+            "scope_enabled": "false",
+            "planner_mode": mode,
+            "use_sim_time": "true",
+        })
+        configured = launch_module._configured_nav2_params(
+            LaunchConfiguration("params_file"),
+            LaunchConfiguration("namespace"),
+            LaunchConfiguration("use_sim_time"),
+            LaunchConfiguration("scope_enabled"),
+            LaunchConfiguration("planner_mode"),
+        )
+        rewritten_path = configured.evaluate(context)
+        rewritten = yaml.safe_load(rewritten_path.read_text())
+        configured.cleanup()
+        assert rewritten["planner_server"]["ros__parameters"]["GridBased"][
+            "plugin"
+        ] == plugin
+        assert rewritten["controller_server"]["ros__parameters"]["FollowPath"] == (
+            original["controller_server"]["ros__parameters"]["FollowPath"])
+        assert rewritten["local_costmap"]["local_costmap"]["ros__parameters"][
+            "scope_layer"
+        ]["enabled"] is False
+
+
+def test_invalid_planner_mode_is_rejected_early():
+    launch_module = load_gazebo_launch_module()
+    context = LaunchContext()
+    context.launch_configurations["planner_mode"] = "invalid"
+    with pytest.raises(RuntimeError, match="planner_mode"):
+        launch_module._validate_planner_mode(context)
+
+
+def test_fast2d_kinodynamic_defaults_stay_within_downstream_envelope():
+    params = yaml.safe_load(PARAMS.read_text())
+    grid_based = params["planner_server"]["ros__parameters"]["GridBased"]
+    assert grid_based["max_velocity_x"] == 0.45
+    assert grid_based["max_velocity_y"] == 0.45
+    assert grid_based["max_accel_x"] == 0.60
+    assert grid_based["max_accel_y"] == 0.60
+    assert grid_based["primitive_duration"] == 0.25
+    assert grid_based["collision_check_dt"] <= 0.05
+    assert grid_based["search_timeout_ms"] == 200
+    assert grid_based["max_expansions"] == 100000
+    follow_path = params["controller_server"]["ros__parameters"]["FollowPath"]
+    assert follow_path["motion_model"] == "Omni"
+    assert follow_path["vx_max"] == 0.5
+    assert follow_path["vy_max"] == 0.5
 
 
 def test_scope_costmap_layer_is_a_runtime_dependency():

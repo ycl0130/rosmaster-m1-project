@@ -5,10 +5,11 @@ import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (
-    DeclareLaunchArgument, GroupAction, IncludeLaunchDescription, TimerAction)
+    DeclareLaunchArgument, GroupAction, IncludeLaunchDescription, OpaqueFunction,
+    TimerAction)
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 from launch_ros.descriptions import ParameterFile
 from launch_ros.parameter_descriptions import ParameterValue
@@ -16,7 +17,11 @@ from nav2_common.launch import RewrittenYaml
 
 
 def _configured_nav2_params(
-        params_path, namespace, use_sim_time, scope_enabled):
+        params_path, namespace, use_sim_time, scope_enabled, planner_mode):
+    planner_plugin = PythonExpression([
+        "'nav2_navfn_planner/NavfnPlanner' if '", planner_mode,
+        "' == 'navfn' else 'm1_fast_planner::Fast2DPlanner'",
+    ])
     return ParameterFile(
         RewrittenYaml(
             source_file=params_path,
@@ -27,11 +32,20 @@ def _configured_nav2_params(
                     "local_costmap.local_costmap.ros__parameters."
                     "scope_layer.enabled"
                 ): scope_enabled,
+                "planner_server.ros__parameters.GridBased.plugin": planner_plugin,
             },
             convert_types=True,
         ),
         allow_substs=True,
     )
+
+
+def _validate_planner_mode(context):
+    mode = LaunchConfiguration("planner_mode").perform(context)
+    if mode not in {"navfn", "fast2d"}:
+        raise RuntimeError(
+            "planner_mode must be either 'navfn' or 'fast2d'; got %r" % mode)
+    return []
 
 
 def generate_launch_description():
@@ -53,6 +67,7 @@ def generate_launch_description():
         namespace,
         use_sim_time,
         LaunchConfiguration("scope_enabled"),
+        LaunchConfiguration("planner_mode"),
     )
     localization_params = ParameterFile(
         RewrittenYaml(
@@ -324,6 +339,11 @@ def generate_launch_description():
         DeclareLaunchArgument("use_sim_time", default_value="true"),
         DeclareLaunchArgument("scope_enabled", default_value="false"),
         DeclareLaunchArgument(
+            "planner_mode", default_value="navfn",
+            description=(
+                "GridBased implementation: navfn for the frozen baseline or "
+                "fast2d for the Phase 1A smoke planner.")),
+        DeclareLaunchArgument(
             "scope_model_path",
             default_value=(
                 "/home/xinlei/Data/SCOPE-repro/reference/scope/"
@@ -338,6 +358,7 @@ def generate_launch_description():
     ]
 
     return LaunchDescription(arguments + [
+        OpaqueFunction(function=_validate_planner_mode),
         gazebo,
         scope_observer,
         scan_relay,

@@ -331,6 +331,26 @@ planner_server:
       tolerance: 0.10
       use_astar: false
       allow_unknown: true
+      # Phase 1A Fast2D smoke-planner parameters.  They are inert when
+      # GridBased resolves to NavFn and are read only by Fast2DPlanner.
+      path_resolution: 0.05
+      max_velocity_x: 0.45
+      max_velocity_y: 0.45
+      max_accel_x: 0.60
+      max_accel_y: 0.60
+      primitive_duration: 0.25
+      collision_check_dt: 0.05
+      collision_check_distance: 0.05
+      position_resolution: 0.10
+      velocity_resolution: 0.10
+      goal_position_tolerance: 0.15
+      goal_velocity_tolerance: 0.20
+      search_timeout_ms: 200
+      max_expansions: 100000
+      time_cost_weight: 1.0
+      control_cost_weight: 0.10
+      odom_topic: /odom
+      odom_timeout: 0.50
 
 smoother_server:
   ros__parameters:
