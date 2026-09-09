@@ -8,12 +8,15 @@ from pathlib import Path
 
 import rclpy
 from action_msgs.msg import GoalStatus
-from geometry_msgs.msg import PoseStamped, Twist, PoseWithCovarianceStamped
+from diagnostic_msgs.msg import DiagnosticArray
+from geometry_msgs.msg import PoseArray, PoseStamped, Twist, PoseWithCovarianceStamped
 from lifecycle_msgs.srv import GetState
 from nav2_msgs.action import ComputePathToPose, FollowPath, NavigateToPose
-from nav_msgs.msg import Odometry
+from nav_msgs.msg import Odometry, Path as NavPath
+from nav_msgs.msg import OccupancyGrid
 from rclpy.action import ActionClient
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, qos_profile_sensor_data
 from rcl_interfaces.srv import GetParameters
 from sensor_msgs.msg import LaserScan
 from tf2_ros import Buffer, TransformListener
@@ -37,14 +40,31 @@ class Probe(Node):
         super().__init__("fast2d_single_plan_probe")
         self.args, self.amcl, self.odom, self.scan = args, None, None, None
         self.clock_samples, self.clock_backwards, self.feedback, self.odom_trace = [], False, [], []
+        self.dynamic_center_min_distance, self.dynamic_samples = math.inf, 0
+        self.plan_snapshots = []
+        self.scope = {"prediction_messages": 0, "uncertainty_messages": 0,
+                      "prediction_nonempty": 0, "uncertainty_nonempty": 0,
+                      "diagnostics": []}
         self.cmd = {topic: {"samples": 0, "nonzero_samples": 0, "max_abs_linear_x": 0.0,
                              "max_abs_linear_y": 0.0, "max_abs_angular_z": 0.0}
                     for topic in ["/cmd_vel_nav", "/cmd_vel_smoothed", "/m1/cmd_vel_raw", "/cmd_vel"]}
         self.create_subscription(PoseWithCovarianceStamped, "/amcl_pose", self.on_amcl, 10)
         self.create_subscription(Odometry, "/odom", self.on_odom, 30)
-        self.create_subscription(LaserScan, "/scan", self.on_scan, 10)
+        self.create_subscription(NavPath, "/plan", self.on_plan, 10)
+        self.create_subscription(OccupancyGrid, "/scope/prediction", self.on_scope_prediction, 10)
+        self.create_subscription(OccupancyGrid, "/scope/uncertainty", self.on_scope_uncertainty, 10)
+        self.create_subscription(DiagnosticArray, "/scope/diagnostics", self.on_scope_diagnostics, 10)
+        # scan_relay intentionally publishes sensor-data QoS (best effort).
+        # A default reliable probe subscription is incompatible and silently
+        # receives no beams, producing a false readiness failure.
+        self.create_subscription(LaserScan, "/scan", self.on_scan, qos_profile_sensor_data)
+        # Evaluation only: this truth topic is never sent to Nav2 or Fast2D.
+        self.create_subscription(PoseArray, "/m1/dynamic_obstacles", self.on_dynamic_obstacles, 10)
         from rosgraph_msgs.msg import Clock
-        self.create_subscription(Clock, "/clock", self.on_clock, 30)
+        # Simulation clock can be published hundreds of times per second.
+        # Retaining a deep queue starves readiness service responses in a
+        # single-threaded diagnostic node.
+        self.create_subscription(Clock, "/clock", self.on_clock, QoSProfile(depth=1))
         for topic in self.cmd:
             self.create_subscription(Twist, topic, lambda msg, t=topic: self.on_cmd(t, msg), 30)
         self.compute = ActionClient(self, ComputePathToPose, "/compute_path_to_pose")
@@ -60,8 +80,44 @@ class Probe(Node):
         self.odom = (msg.pose.pose.position.x, msg.pose.pose.position.y, yaw(msg.pose.pose.orientation))
         self.odom_trace.append((time.monotonic(), *self.odom))
 
+    def on_plan(self, msg):
+        points = [(pose.pose.position.x, pose.pose.position.y) for pose in msg.poses]
+        length = sum(math.hypot(points[i][0] - points[i - 1][0], points[i][1] - points[i - 1][1])
+                     for i in range(1, len(points)))
+        snapshot = {"wall_time_s": time.monotonic(), "points": len(points), "length_m": length,
+                    "start": points[0] if points else None, "end": points[-1] if points else None}
+        if not self.plan_snapshots or snapshot["points"] != self.plan_snapshots[-1]["points"] or abs(snapshot["length_m"] - self.plan_snapshots[-1]["length_m"]) > 0.02:
+            self.plan_snapshots.append(snapshot)
+
+    def on_scope_prediction(self, msg):
+        self.scope["prediction_messages"] += 1
+        if any(value > 0 for value in msg.data):
+            self.scope["prediction_nonempty"] += 1
+
+    def on_scope_uncertainty(self, msg):
+        self.scope["uncertainty_messages"] += 1
+        if any(value > 0 for value in msg.data):
+            self.scope["uncertainty_nonempty"] += 1
+
+    def on_scope_diagnostics(self, msg):
+        for status in msg.status:
+            values = {str(item.key): str(item.value) for item in status.values}
+            level = status.level[0] if isinstance(status.level, bytes) else status.level
+            self.scope["diagnostics"].append({"level": int(level), "message": str(status.message),
+                                              "values": values})
+
     def on_scan(self, msg):
         self.scan = msg
+
+    def on_dynamic_obstacles(self, msg):
+        pose = self.pose()
+        if pose is None:
+            return
+        self.dynamic_samples += len(msg.poses)
+        for obstacle in msg.poses:
+            self.dynamic_center_min_distance = min(
+                self.dynamic_center_min_distance,
+                math.hypot(pose[0] - obstacle.position.x, pose[1] - obstacle.position.y))
 
     def on_clock(self, msg):
         value = msg.clock.sec + msg.clock.nanosec * 1e-9
@@ -170,7 +226,13 @@ class Probe(Node):
             rclpy.spin_once(self, timeout_sec=0.05)
         final = self.pose()
         report.update({"final_map_pose": final, "final_amcl": self.amcl, "final_odom": self.odom,
-                       "cmd_vel_stats": self.cmd, "clock_backwards": self.clock_backwards})
+                       "cmd_vel_stats": self.cmd, "clock_backwards": self.clock_backwards,
+                       "replan_snapshots": self.plan_snapshots,
+                       "scope_evaluation": self.scope})
+        if self.dynamic_samples:
+            report["dynamic_truth_evaluation"] = {
+                "samples": self.dynamic_samples,
+                "minimum_center_distance_m": self.dynamic_center_min_distance}
         if final:
             report["final_position_error"] = distance(final, (self.args.x, self.args.y))
             report["final_yaw_error"] = abs(math.atan2(math.sin(final[2] - self.args.yaw), math.cos(final[2] - self.args.yaw)))

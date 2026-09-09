@@ -26,6 +26,10 @@ def generate_launch_description():
         DeclareLaunchArgument("rviz", default_value="false"),
         Node(
             package="m1_scope_predictor", executable="scope_predictor",
+            # The ROS Humble console-script wrapper is generated with the
+            # system Python shebang.  Run it through the established ROS/ML
+            # Python 3.10 environment so its frozen CUDA runtime is visible.
+            prefix="/home/lin24311/car_ws/.venv-ros2-ml/bin/python",
             name="scope_predictor", output="screen",
             parameters=[config, {
                 "use_sim_time": ParameterValue(

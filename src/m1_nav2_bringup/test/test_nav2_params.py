@@ -124,9 +124,9 @@ def test_scope_costmap_layer_is_local_only_and_precedes_inflation():
         "enabled": False,
         "prediction_topic": "/scope/prediction",
         "uncertainty_topic": "/scope/uncertainty",
-        "low_threshold": 0.35,
-        "lethal_threshold": 0.60,
-        "uncertainty_gain": 1.0,
+        "low_threshold": 0.45,
+        "lethal_threshold": 0.85,
+        "uncertainty_gain": 0.5,
         "uncertainty_encoding_scale": 0.5,
         "medium_cost": 200,
         "stale_timeout": 0.5,
@@ -172,6 +172,7 @@ def test_scope_enabled_drives_predictor_and_only_the_local_scope_layer(
             LaunchConfiguration("use_sim_time"),
             LaunchConfiguration("scope_enabled"),
             LaunchConfiguration("planner_mode"),
+            "/tmp/navigate_to_pose_fast2d_replanning.xml",
         )
         rewritten_path = configured.evaluate(context)
         rewritten = yaml.safe_load(rewritten_path.read_text())
@@ -192,6 +193,12 @@ def test_scope_enabled_drives_predictor_and_only_the_local_scope_layer(
         expected["planner_server"]["ros__parameters"]["GridBased"][
             "plugin"
         ] = "nav2_navfn_planner/NavfnPlanner"
+        expected["bt_navigator"]["ros__parameters"][
+            "default_nav_to_pose_bt_xml"
+        ] = (
+            "/opt/ros/humble/share/nav2_bt_navigator/behavior_trees/"
+            "navigate_to_pose_w_replanning_and_recovery.xml"
+        )
         for node in expected.values():
             if isinstance(node, dict) and "ros__parameters" in node:
                 node["ros__parameters"]["use_sim_time"] = True
@@ -231,6 +238,7 @@ def test_planner_mode_rewrites_only_gridbased_plugin(monkeypatch, tmp_path):
             LaunchConfiguration("use_sim_time"),
             LaunchConfiguration("scope_enabled"),
             LaunchConfiguration("planner_mode"),
+            "/tmp/navigate_to_pose_fast2d_replanning.xml",
         )
         rewritten_path = configured.evaluate(context)
         rewritten = yaml.safe_load(rewritten_path.read_text())
@@ -238,6 +246,14 @@ def test_planner_mode_rewrites_only_gridbased_plugin(monkeypatch, tmp_path):
         assert rewritten["planner_server"]["ros__parameters"]["GridBased"][
             "plugin"
         ] == plugin
+        expected_tree = (
+            "/opt/ros/humble/share/nav2_bt_navigator/behavior_trees/"
+            "navigate_to_pose_w_replanning_and_recovery.xml"
+            if mode == "navfn" else "/tmp/navigate_to_pose_fast2d_replanning.xml"
+        )
+        assert rewritten["bt_navigator"]["ros__parameters"][
+            "default_nav_to_pose_bt_xml"
+        ] == expected_tree
         assert rewritten["controller_server"]["ros__parameters"]["FollowPath"] == (
             original["controller_server"]["ros__parameters"]["FollowPath"])
         assert rewritten["local_costmap"]["local_costmap"]["ros__parameters"][
@@ -394,10 +410,10 @@ def test_velocity_smoother_matches_mppi_limits_and_acceleration_profile():
     assert smoother["smoothing_frequency"] == 20.0
     assert smoother["scale_velocities"] is True
     assert smoother["feedback"] == "CLOSED_LOOP"
-    assert smoother["max_velocity"] == [0.5, 0.5, 0.8]
-    assert smoother["min_velocity"] == [-0.5, -0.5, -0.8]
-    assert smoother["max_accel"] == [0.8, 0.8, 1.0]
-    assert smoother["max_decel"] == [-0.8, -0.8, -1.0]
+    assert smoother["max_velocity"] == [0.25, 0.25, 0.4]
+    assert smoother["min_velocity"] == [-0.25, -0.25, -0.4]
+    assert smoother["max_accel"] == [0.4, 0.4, 0.7]
+    assert smoother["max_decel"] == [-0.5, -0.5, -0.8]
 
 
 def test_mppi_path_alignment_and_forward_preference_weights():

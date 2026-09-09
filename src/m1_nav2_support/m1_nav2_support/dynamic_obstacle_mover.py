@@ -33,7 +33,7 @@ class DynamicObstacleMover(Node):
         self.period = float(self.get_parameter("control_period").value)
         self.enabled = bool(self.get_parameter("enabled").value)
         self.motion_mode = str(self.get_parameter("motion_mode").value).strip().lower()
-        if self.motion_mode not in {"continuous", "random_waypoint"}:
+        if self.motion_mode not in {"continuous", "random_waypoint", "crossing"}:
             self.get_logger().warn(
                 f"Unknown motion_mode={self.motion_mode!r}; using continuous.")
             self.motion_mode = "continuous"
@@ -73,6 +73,9 @@ class DynamicObstacleMover(Node):
                 obstacle["target_velocity"] = self.sample_random_velocity(obstacle)
                 obstacle["next_velocity_change"] = self.random.uniform(0.8, 2.2)
         self.motion_time = 0.0
+        self.crossing_initialized = False
+        self.crossing_pose_confirmed = False
+        self.crossing_started = False
 
         # Gazebo's VelocityControl system owns the continuous motion.  The
         # controller sends a direction at a modest ROS rate, while Gazebo
@@ -83,6 +86,7 @@ class DynamicObstacleMover(Node):
                 Twist, f"/model/{obstacle['name']}/cmd_vel", 10)
             for obstacle in self.obstacles
         }
+        self.create_subscription(Twist, "/cmd_vel", self.cmd_vel_callback, 10)
         # This service is retained only to park the models in static-only
         # scenarios. It is never used while the obstacles are moving.
         self.client = self.create_client(
@@ -199,6 +203,10 @@ class DynamicObstacleMover(Node):
             pose.orientation = transform.transform.rotation
             self.actual_poses[name] = pose
 
+    def cmd_vel_callback(self, message):
+        if abs(message.linear.x) + abs(message.linear.y) + abs(message.angular.z) > 1e-3:
+            self.crossing_started = True
+
     def publish_actual_positions(self):
         """Publish Gazebo's current model poses, not the controller estimate."""
         if len(self.actual_poses) != len(self.obstacles):
@@ -282,6 +290,37 @@ class DynamicObstacleMover(Node):
             message.header.stamp = self.get_clock().now().to_msg()
             message.header.frame_id = "odom"
             self.publisher.publish(message)
+            return
+
+        if self.motion_mode == "crossing":
+            # Test-only deterministic side crossing of the vertical simple
+            # route x=-2.5.  PoseArray remains software-lidar input only;
+            # Nav2 never subscribes to it.
+            if not self.crossing_initialized:
+                if not self.client.service_is_ready():
+                    return
+                for index, obstacle in enumerate(self.obstacles):
+                    obstacle["position"] = [-2.90, 0.0] if index == 0 else [10.0 + index, 10.0]
+                    self.send_pose(obstacle)
+                    self.send_velocity(obstacle, 0.0, 0.0)
+                self.crossing_initialized = True
+                return
+            if not self.crossing_pose_confirmed:
+                actual = self.actual_poses.get(self.obstacles[0]["name"])
+                if actual is None or self.distance(
+                        (actual.position.x, actual.position.y), (-2.90, 0.0)) > 0.15:
+                    return
+                self.crossing_pose_confirmed = True
+            if not self.crossing_started:
+                return
+            obstacle = self.obstacles[0]
+            velocity_x = 0.15 if obstacle["position"][0] < 3.45 else -0.15
+            if obstacle["position"][0] <= -3.45:
+                velocity_x = 0.15
+            obstacle["position"][0] += velocity_x * self.period
+            obstacle["position"][0] = min(3.45, max(-3.45, obstacle["position"][0]))
+            self.send_velocity(obstacle, velocity_x, 0.0)
+            self.motion_time += self.period
             return
 
         for obstacle in self.obstacles:

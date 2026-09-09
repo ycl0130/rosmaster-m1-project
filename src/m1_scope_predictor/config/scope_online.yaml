@@ -12,7 +12,10 @@ scope_predictor:
     buffer_duration: 3.0
     scheduler_rate: 10.0
     scan_tolerance: 0.05
-    prediction_horizon_steps: 5
+    # Keep the online forecast local for the dense, continuously moving demo.
+    # The frozen model is unchanged; this only limits how far its prediction
+    # is projected into the rolling local costmap.
+    prediction_horizon_steps: 2
     num_samples: 4
     max_prediction_age: 1.0
     evaluator_enabled: false

@@ -17,10 +17,16 @@ from nav2_common.launch import RewrittenYaml
 
 
 def _configured_nav2_params(
-        params_path, namespace, use_sim_time, scope_enabled, planner_mode):
+        params_path, namespace, use_sim_time, scope_enabled, planner_mode,
+        fast2d_bt_xml):
     planner_plugin = PythonExpression([
         "'nav2_navfn_planner/NavfnPlanner' if '", planner_mode,
         "' == 'navfn' else 'm1_fast_planner::Fast2DPlanner'",
+    ])
+    nav_to_pose_tree = PythonExpression([
+        "'/opt/ros/humble/share/nav2_bt_navigator/behavior_trees/"
+        "navigate_to_pose_w_replanning_and_recovery.xml' if '", planner_mode,
+        "' == 'navfn' else '", fast2d_bt_xml, "'",
     ])
     return ParameterFile(
         RewrittenYaml(
@@ -33,6 +39,10 @@ def _configured_nav2_params(
                     "scope_layer.enabled"
                 ): scope_enabled,
                 "planner_server.ros__parameters.GridBased.plugin": planner_plugin,
+                # The Fast2D-specific tree retains Nav2's stock recovery
+                # behavior, but asks for the global kinodynamic path at 2 Hz.
+                # NavFn keeps Humble's stock 1 Hz tree unchanged.
+                "bt_navigator.ros__parameters.default_nav_to_pose_bt_xml": nav_to_pose_tree,
             },
             convert_types=True,
         ),
@@ -68,6 +78,9 @@ def generate_launch_description():
         use_sim_time,
         LaunchConfiguration("scope_enabled"),
         LaunchConfiguration("planner_mode"),
+        os.path.join(
+            bringup_share, "behavior_trees",
+            "navigate_to_pose_fast2d_replanning.xml"),
     )
     localization_params = ParameterFile(
         RewrittenYaml(
@@ -280,7 +293,12 @@ def generate_launch_description():
         package="rviz2",
         executable="rviz2",
         name="nav2_rviz",
-        condition=IfCondition(LaunchConfiguration("rviz")),
+        # The legacy Gazebo and SCOPE includes both expose an ``rviz``
+        # argument and are deliberately invoked with ``rviz:=false``.  Do
+        # not share that argument with this top-level Nav2 visualizer: an
+        # included launch can otherwise make this condition false before the
+        # delayed action is evaluated.
+        condition=IfCondition(LaunchConfiguration("nav2_rviz")),
         arguments=["-d", os.path.join(bringup_share, "rviz", "m1_nav2.rviz")],
         output="screen",
     )
@@ -288,6 +306,9 @@ def generate_launch_description():
     arguments = [
         DeclareLaunchArgument("gui", default_value="true"),
         DeclareLaunchArgument("rviz", default_value="true"),
+        DeclareLaunchArgument(
+            "nav2_rviz", default_value="true",
+            description="Start the top-level Nav2 RViz visualizer."),
         DeclareLaunchArgument(
             "rviz_start_delay",
             default_value="30.0",

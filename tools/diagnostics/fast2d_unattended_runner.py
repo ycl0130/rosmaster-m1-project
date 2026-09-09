@@ -52,21 +52,39 @@ def environment(index, name):
     return env, domain, partition
 
 
-def one(mode, name, index, dynamic=False, seed=None, action="fixed", retries=3):
+def one(mode, name, index, dynamic=False, seed=None, action="fixed", retries=3,
+        x=2.5, y=1.5, yaw=0.0, motion_mode="continuous", scope_enabled=False,
+        scope_model_path=None):
     case_dir = OUT / name
     case_dir.mkdir(parents=True, exist_ok=True)
     for attempt in range(retries):
         env, domain, partition = environment(index * retries + attempt, name)
         run_dir = case_dir / f"attempt_{attempt + 1}"
         run_dir.mkdir(parents=True, exist_ok=True)
+        # Codex runs with a read-only home directory.  Keep all ROS launch and
+        # rclpy logs with the run evidence instead of falling back to ~/.ros.
+        ros_log_dir = run_dir / "roslog"
+        ros_log_dir.mkdir(exist_ok=True)
+        env["ROS_LOG_DIR"] = str(ros_log_dir)
+        # Ignition also writes runtime state under $HOME by default.  The
+        # workspace sandbox mounts the real home read-only, so give every run
+        # an isolated writable home alongside its evidence.
+        run_home = run_dir / "home"
+        run_home.mkdir(exist_ok=True)
+        env["HOME"] = str(run_home)
         metadata = {"name": name, "attempt": attempt + 1, "planner_mode": mode,
                     "dynamic_obstacles": dynamic, "dynamic_seed": seed, "action": action,
-                    "ROS_DOMAIN_ID": domain, "IGN_PARTITION": partition, "GZ_PARTITION": partition}
+                    "goal": [x, y, yaw],
+                    "ROS_DOMAIN_ID": domain, "IGN_PARTITION": partition, "GZ_PARTITION": partition,
+                    "ROS_LOG_DIR": str(ros_log_dir), "HOME": str(run_home)}
         write_json(run_dir / "environment.json", metadata)
         launch = ["ros2", "launch", "m1_nav2_bringup", "nav2_m1_gazebo.launch.py",
                   "gui:=false", "rviz:=false", "software_lidar:=true",
-                  f"dynamic_obstacles:={str(dynamic).lower()}", "scope_enabled:=false",
-                  f"planner_mode:={mode}"]
+                  f"dynamic_obstacles:={str(dynamic).lower()}",
+                  f"scope_enabled:={str(scope_enabled).lower()}",
+                  f"planner_mode:={mode}", f"dynamic_motion_mode:={motion_mode}"]
+        if scope_model_path:
+            launch.append(f"scope_model_path:={scope_model_path}")
         if seed is not None:
             launch.append(f"dynamic_seed:={seed}")
         launch_command = " ".join(subprocess.list2cmdline([item]) for item in launch)
@@ -77,12 +95,22 @@ def one(mode, name, index, dynamic=False, seed=None, action="fixed", retries=3):
             try:
                 probe = ["python3", "tools/diagnostics/fast2d_single_plan_probe.py",
                          "--output", str(run_dir / "result.json"),
-                         "--path-output", str(run_dir / "path.json"), "--action", action]
+                         "--path-output", str(run_dir / "path.json"), "--action", action,
+                         "--x", str(x), "--y", str(y), "--yaw", str(yaw)]
                 command = " ".join(subprocess.list2cmdline([item]) for item in probe)
+                # The probe can legitimately spend ready_timeout plus its
+                # action timeout in one foreground invocation.  Keep this
+                # outer guard larger than their sum and preserve a formal
+                # result if the guard itself fires.
                 completed = subprocess.run(sourced(command), cwd=ROOT, env=env, text=True,
-                                           capture_output=True, timeout=190)
+                                           capture_output=True, timeout=230)
                 (run_dir / "probe.stdout").write_text(completed.stdout)
                 (run_dir / "probe.stderr").write_text(completed.stderr)
+            except subprocess.TimeoutExpired as error:
+                (run_dir / "runner_error.txt").write_text(repr(error))
+                write_json(run_dir / "result.json", {
+                    "environment_status": "RUNNER_TIMEOUT",
+                    "error": "probe exceeded runner timeout"})
             except Exception as error:
                 (run_dir / "runner_error.txt").write_text(repr(error))
             finally:
@@ -108,8 +136,18 @@ def main():
     parser.add_argument("--seed", type=int)
     parser.add_argument("--action", choices=["fixed", "navigate"], default="fixed")
     parser.add_argument("--index", type=int, default=0)
+    parser.add_argument("--x", type=float, default=2.5)
+    parser.add_argument("--y", type=float, default=1.5)
+    parser.add_argument("--yaw", type=float, default=0.0)
+    parser.add_argument("--motion-mode", default="continuous")
+    parser.add_argument("--scope-enabled", action="store_true")
+    parser.add_argument("--scope-model-path")
     args = parser.parse_args()
-    print(json.dumps(one(args.mode, args.name, args.index, args.dynamic, args.seed, args.action), indent=2))
+    print(json.dumps(one(args.mode, args.name, args.index, args.dynamic, args.seed, args.action,
+                         x=args.x, y=args.y, yaw=args.yaw,
+                         motion_mode=args.motion_mode,
+                         scope_enabled=args.scope_enabled,
+                         scope_model_path=args.scope_model_path), indent=2))
 
 
 if __name__ == "__main__":
