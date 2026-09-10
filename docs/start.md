@@ -1,7 +1,7 @@
 # Nav2 MPPI 仿真启动
 
 ```bash
-cd /home/xinlei/Data/ROS/rosmaster-m1-project
+cd /path/to/rosmaster-m1-project
 source /opt/ros/humble/setup.bash
 colcon build --packages-select yahboomcar_description m1_nav2_support m1_nav2_bringup --symlink-install
 source install/setup.bash

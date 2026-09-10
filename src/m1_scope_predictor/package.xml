@@ -9,6 +9,7 @@
   <buildtool_depend>ament_python</buildtool_depend>
   <depend>diagnostic_msgs</depend>
   <depend>m1_scope_bridge</depend>
+  <depend>m1_scope_msgs</depend>
   <depend>nav_msgs</depend>
   <depend>rclpy</depend>
   <depend>sensor_msgs</depend>

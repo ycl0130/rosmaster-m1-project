@@ -8,6 +8,7 @@ from diagnostic_msgs.msg import DiagnosticArray
 from nav2_msgs.msg import Costmap
 from nav2_msgs.srv import GetCostmap
 from nav_msgs.msg import Path as NavPath
+from m1_local_fast2d.msg import TimedTrajectory
 from rclpy.node import Node
 
 LETHAL, INSCRIBED, UNKNOWN = 254, 253, 255
@@ -29,9 +30,14 @@ class Validator(Node):
         super().__init__('m1_local_fast2d_guide_validator')
         self.c = self.create_client(GetCostmap, '/local_costmap/get_costmap')
         self.exact, self.post, self.post_skews = empty_stats(), empty_stats(), []
-        self.paths, self.maps, self.pending, self.guide_ids, self.errors = {}, {}, {}, {}, []
+        self.paths, self.maps, self.trajectories, self.pending, self.guide_ids, self.errors = {}, {}, {}, {}, {}, []
+        self.trajectory_stats = dict(accepted_trajectories=0, point_count=0,
+                                     max_path_position_error=0.0, monotonic_time=True,
+                                     finite_state=True, yaw_consistent=True,
+                                     id_coupled=True)
         self.create_subscription(NavPath, '/local_fast2d/accepted_path', self.path_cb, 10)
         self.create_subscription(Costmap, '/local_fast2d/accepted_costmap', self.map_cb, 10)
+        self.create_subscription(TimedTrajectory, '/local_fast2d/accepted_timed_trajectory', self.trajectory_cb, 10)
         self.create_subscription(DiagnosticArray, '/local_fast2d/diagnostics', self.diag_cb, 20)
 
     def path_cb(self, path):
@@ -50,6 +56,12 @@ class Validator(Node):
             self.errors.append(f'invalid/duplicate accepted_costmap stamp {key}'); return
         self.maps[key] = costmap; self.try_pair(key)
 
+    def trajectory_cb(self, trajectory):
+        key = stamp_ns(trajectory.header)
+        if not key or key in self.trajectories:
+            self.errors.append(f'invalid/duplicate accepted_timed_trajectory stamp {key}'); return
+        self.trajectories[key] = trajectory; self.try_pair(key)
+
     def diag_cb(self, array):
         for status in array.status:
             if status.name != 'local_fast2d_accepted_snapshot':
@@ -57,21 +69,50 @@ class Validator(Node):
             values = {v.key: v.value for v in status.values}
             try:
                 key, guide_id = int(values['snapshot_stamp_ns']), int(values['accepted_guide_id'])
+                trajectory_id = int(values['accepted_trajectory_id'])
             except (KeyError, ValueError):
                 self.errors.append('malformed accepted-snapshot diagnostic'); continue
-            if key != stamp_ns(array.header) or key in self.guide_ids:
+            if key != stamp_ns(array.header) or key in self.guide_ids or trajectory_id != guide_id:
                 self.errors.append(f'invalid/duplicate accepted diagnostic stamp {key}'); continue
             self.guide_ids[key] = guide_id; self.try_pair(key)
 
     def try_pair(self, key):
-        if key not in self.paths or key not in self.maps:
+        if key not in self.paths or key not in self.maps or key not in self.trajectories:
             return
         # Header stamp and unique planning-result id are both required.
         if key not in self.guide_ids:
             self.pending[key] = True; return
-        path, costmap = self.paths.pop(key), self.maps.pop(key)
+        path, costmap, trajectory = self.paths.pop(key), self.maps.pop(key), self.trajectories.pop(key)
         self.pending.pop(key, None)
         self.validate(path, costmap, self.exact)
+        self.validate_trajectory(path, trajectory, self.guide_ids[key])
+
+    def validate_trajectory(self, path, trajectory, guide_id):
+        stats, points = self.trajectory_stats, trajectory.points
+        stats['accepted_trajectories'] += 1; stats['point_count'] += len(points)
+        if trajectory.planning_result_id != guide_id:
+            stats['id_coupled'] = False; self.errors.append('accepted trajectory id does not match guide id')
+        if trajectory.header.frame_id != path.header.frame_id or len(points) != len(path.poses):
+            self.errors.append('accepted trajectory header or point count mismatches accepted path'); return
+        previous = -1.0
+        for index, (point, pose) in enumerate(zip(points, path.poses)):
+            if point.point_index != index:
+                self.errors.append(f'trajectory point index mismatch {index}')
+            fields = (point.x, point.y, point.yaw, point.time_from_start,
+                      point.vx, point.vy, point.ax, point.ay)
+            if not all(math.isfinite(value) for value in fields):
+                stats['finite_state'] = False; self.errors.append(f'nonfinite trajectory state {index}'); continue
+            if point.time_from_start < 0.0 or point.time_from_start < previous:
+                stats['monotonic_time'] = False; self.errors.append(f'nonmonotonic trajectory time {index}')
+            previous = point.time_from_start
+            error = math.hypot(point.x-pose.pose.position.x, point.y-pose.pose.position.y)
+            stats['max_path_position_error'] = max(stats['max_path_position_error'], error)
+            if error > 1e-9:
+                self.errors.append(f'trajectory/path position mismatch {index}')
+            yaw = math.atan2(2.0*(pose.pose.orientation.w*pose.pose.orientation.z),
+                             1.0-2.0*(pose.pose.orientation.z**2))
+            if abs(math.atan2(math.sin(point.yaw-yaw), math.cos(point.yaw-yaw))) > 1e-9:
+                stats['yaw_consistent'] = False; self.errors.append(f'trajectory/path yaw mismatch {index}')
 
     def validate(self, path, costmap, stats):
         info, pts, res = costmap.metadata, path.poses, costmap.metadata.resolution
@@ -111,6 +152,7 @@ class Validator(Node):
         for key in self.pending: self.errors.append(f'path/costmap missing diagnostic stamp {key}')
         for key in self.paths: self.errors.append(f'unmatched accepted_path stamp {key}')
         for key in self.maps: self.errors.append(f'unmatched accepted_costmap stamp {key}')
+        for key in self.trajectories: self.errors.append(f'unmatched accepted_timed_trajectory stamp {key}')
         skews = [s for s in self.post_skews if s is not None]
         result = {
             'exact_planning_snapshot': self.exact,
@@ -120,7 +162,8 @@ class Validator(Node):
                 'min': min(skews) if skews else None, 'max': max(skews) if skews else None,
                 'mean': sum(skews)/len(skews) if skews else None},
             'exact_snapshot_pairing': {'paired_guides': self.exact['total_accepted_guides'],
-                'guide_ids': sorted(self.guide_ids.values()), 'errors': self.errors}}
+                'guide_ids': sorted(self.guide_ids.values()), 'errors': self.errors},
+            'accepted_timed_trajectory_validation': self.trajectory_stats}
         Path(out).parent.mkdir(parents=True, exist_ok=True)
         Path(out).write_text(json.dumps(result, indent=2))
 

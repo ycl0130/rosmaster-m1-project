@@ -1,0 +1,8 @@
+std_msgs/Header header
+uint64 planning_result_id
+uint64 input_generation
+uint32 requested_candidate_count
+uint32 valid_candidate_count
+float64 primary_planning_latency_ms
+float64 total_planning_latency_ms
+LocalTrajectoryCandidate[] candidates

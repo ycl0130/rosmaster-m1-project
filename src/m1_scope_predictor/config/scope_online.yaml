@@ -6,7 +6,9 @@ scope_predictor:
     ground_truth_topic: /ground_truth/odom
     base_frame: base_footprint
     odom_frame: odom
-    model_path: /home/xinlei/Data/SCOPE-repro/reference/scope/model/scope_model.pth
+    # Trained checkpoint is an external asset. Override through launch
+    # `model_path` or the M1_SCOPE_MODEL_PATH environment variable.
+    model_path: scope_model.pth
     device: cuda
     seed: 1337
     buffer_duration: 3.0
@@ -15,7 +17,11 @@ scope_predictor:
     # Keep the online forecast local for the dense, continuously moving demo.
     # The frozen model is unchanged; this only limits how far its prediction
     # is projected into the rolling local costmap.
-    prediction_horizon_steps: 2
+    # Frozen model cadence. The legacy endpoint remains step 2 even when the
+    # parallel typed sequence is extended for an observation benchmark.
+    prediction_dt: 0.1
+    legacy_horizon_steps: 2
+    sequence_horizon_steps: 2
     num_samples: 4
     max_prediction_age: 1.0
     evaluator_enabled: false

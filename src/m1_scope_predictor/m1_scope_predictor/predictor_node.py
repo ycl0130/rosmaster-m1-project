@@ -9,6 +9,7 @@ import numpy as np
 import rclpy
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
 from nav_msgs.msg import OccupancyGrid, Odometry
+from m1_scope_msgs.msg import ScopePredictionSequence, ScopePredictionSlice
 from rclpy.duration import Duration
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
@@ -62,10 +63,11 @@ class ScopePredictorNode(Node):
             ("scan_topic", "/scan"), ("odom_topic", "/odom"),
             ("ground_truth_topic", "/ground_truth/odom"),
             ("base_frame", "base_footprint"), ("odom_frame", "odom"),
-            ("model_path", "/home/xinlei/Data/SCOPE-repro/reference/scope/model/scope_model.pth"),
+            ("model_path", "scope_model.pth"),
             ("device", "cuda"), ("seed", 1337),
             ("buffer_duration", 3.0), ("scheduler_rate", 10.0),
-            ("scan_tolerance", 0.05), ("prediction_horizon_steps", 5),
+            ("scan_tolerance", 0.05), ("prediction_dt", 0.1),
+            ("legacy_horizon_steps", 2), ("sequence_horizon_steps", 2),
             ("num_samples", 4), ("max_prediction_age", 1.0),
             ("evaluator_enabled", False), ("occupancy_threshold", 0.5),
         )
@@ -73,12 +75,18 @@ class ScopePredictorNode(Node):
             self.declare_parameter(name, value)
         self.buffer_ns = int(float(self._parameter("buffer_duration")) * 1e9)
         self.tolerance_ns = int(float(self._parameter("scan_tolerance")) * 1e9)
-        self.horizon_seconds = int(self._parameter("prediction_horizon_steps")) / 10.0
+        self.prediction_dt = float(self._parameter("prediction_dt"))
+        self.legacy_horizon_steps = int(self._parameter("legacy_horizon_steps"))
+        self.sequence_horizon_steps = int(self._parameter("sequence_horizon_steps"))
+        if self.prediction_dt != 0.1 or self.legacy_horizon_steps != 2 or not 2 <= self.sequence_horizon_steps <= 20:
+            raise ValueError("prediction_dt must be 0.1, legacy_horizon_steps must be 2, and sequence_horizon_steps must be in [2,20]")
+        self.horizon_seconds = self.legacy_horizon_steps * self.prediction_dt
         self.scans = deque()
         self.odometry = deque()
         self.ground_truth = deque()
         self.buffer_lock = threading.Lock()
         self.next_anchor_ns = None
+        self.input_generation = 0
         self.base_to_laser = None
         self.scan_frame = None
         self.output = LatestMailbox()
@@ -89,6 +97,7 @@ class ScopePredictorNode(Node):
         self.last_publish_wall = None
         self.output_intervals = deque(maxlen=30)
         self.jobs_submitted = 0
+        self.prediction_id = 0
         self.pending_evaluations = PendingEvaluationQueue(maximum=32)
         self.last_metrics = None
 
@@ -98,6 +107,8 @@ class ScopePredictorNode(Node):
             OccupancyGrid, "/scope/prediction", 1)
         self.uncertainty_publisher = self.create_publisher(
             OccupancyGrid, "/scope/uncertainty", 1)
+        self.sequence_publisher = self.create_publisher(
+            ScopePredictionSequence, "/scope/prediction_sequence", 1)
         self.diagnostic_publisher = self.create_publisher(
             DiagnosticArray, "/scope/diagnostics", 1)
         self.create_subscription(
@@ -117,7 +128,7 @@ class ScopePredictorNode(Node):
                 self._parameter("seed"))
             self.worker = InferenceWorker(
                 backend, self.output,
-                self._parameter("prediction_horizon_steps"),
+                self.sequence_horizon_steps,
                 self._parameter("num_samples"))
             self.worker.start()
         except Exception as error:
@@ -139,6 +150,7 @@ class ScopePredictorNode(Node):
         if values and stamp_ns <= values[-1].stamp_ns:
             values.clear()
             self.next_anchor_ns = None
+            self.input_generation += 1
             self.last_input_state = "TIME_RESET"
 
     def _scan_callback(self, message):
@@ -209,7 +221,7 @@ class ScopePredictorNode(Node):
         try:
             job = build_job(
                 scans, odometry, self.base_to_laser, anchor_target,
-                self.horizon_seconds, self.tolerance_ns)
+                self.horizon_seconds, self.tolerance_ns, self.input_generation)
         except ValueError as error:
             self.last_input_state = str(error)
             return
@@ -232,6 +244,26 @@ class ScopePredictorNode(Node):
         message.data = conversion(grid)
         return message
 
+    def _sequence_message(self, result):
+        message = ScopePredictionSequence()
+        message.header.frame_id = str(self._parameter("odom_frame"))
+        _set_stamp(message.header.stamp, result.job.anchor_stamp_ns)
+        self.prediction_id += 1
+        message.prediction_id = self.prediction_id
+        for index, (mean, standard_deviation) in enumerate(
+                zip(result.means, result.standard_deviations), start=1):
+            slice_message = ScopePredictionSlice()
+            offset_ns = int(round(index * self.prediction_dt * 1e9))
+            slice_message.time_from_start.sec = offset_ns // 1_000_000_000
+            slice_message.time_from_start.nanosec = offset_ns % 1_000_000_000
+            stamp_ns = result.job.anchor_stamp_ns + offset_ns
+            slice_message.probability = self._grid_message(
+                mean, result.job.future_laser_pose, stamp_ns, probability_data)
+            slice_message.uncertainty = self._grid_message(
+                standard_deviation, result.job.future_laser_pose, stamp_ns, uncertainty_data)
+            message.slices.append(slice_message)
+        return message
+
     def _publish_result(self):
         result = self.output.take()
         if result is None:
@@ -241,6 +273,9 @@ class ScopePredictorNode(Node):
             self.terminal_error = result.error
             self.get_logger().error("SCOPE inference stopped: %s" % result.error)
             return
+        if result.job.input_generation != self.input_generation:
+            self.last_input_state = "TIME_RESET"
+            return
         age = (self.get_clock().now().nanoseconds - result.job.anchor_stamp_ns) / 1e9
         if age > float(self._parameter("max_prediction_age")):
             self.last_input_state = "STALE_RESULT"
@@ -248,12 +283,12 @@ class ScopePredictorNode(Node):
         self.current_publisher.publish(self._grid_message(
             result.job.current_ogm, result.job.current_laser_pose,
             result.job.anchor_stamp_ns, endpoint_data))
-        self.prediction_publisher.publish(self._grid_message(
-            result.mean, result.job.future_laser_pose,
-            result.job.target_stamp_ns, probability_data))
-        self.uncertainty_publisher.publish(self._grid_message(
-            result.standard_deviation, result.job.future_laser_pose,
-            result.job.target_stamp_ns, uncertainty_data))
+        sequence = self._sequence_message(result)
+        self.sequence_publisher.publish(sequence)
+        legacy_index = self.legacy_horizon_steps - 1
+        legacy_slice = sequence.slices[legacy_index]
+        self.prediction_publisher.publish(legacy_slice.probability)
+        self.uncertainty_publisher.publish(legacy_slice.uncertainty)
         now = time.monotonic()
         if self.last_publish_wall is not None:
             self.output_intervals.append(now - self.last_publish_wall)
@@ -294,7 +329,8 @@ class ScopePredictorNode(Node):
         target = points_to_grid(compensate_points(
             points, actual_laser, pose_to_matrix(result.job.future_laser_pose)))
         self.last_metrics = endpoint_metrics(
-            result.mean, target, self._parameter("occupancy_threshold"))
+            result.means[self.legacy_horizon_steps - 1], target,
+            self._parameter("occupancy_threshold"))
 
     def _publish_diagnostics(self):
         message = DiagnosticArray()
@@ -330,6 +366,8 @@ class ScopePredictorNode(Node):
             "jobs_submitted": str(self.jobs_submitted),
             "jobs_dropped": str(self.worker.dropped if self.worker else 0),
             "cuda_memory_bytes": str(result.memory_bytes if result else 0),
+            "sequence_horizon_steps": str(self.sequence_horizon_steps),
+            "legacy_horizon_steps": str(self.legacy_horizon_steps),
         }
         if self.last_metrics:
             for key in ("mae", "occupied_iou", "f1"):

@@ -44,6 +44,7 @@ def test_build_job_selects_ten_unique_scans_and_interpolates_odom():
         scans, odometry, np.eye(3), anchor_target_ns=900_000_000,
         horizon_seconds=0.5, tolerance_ns=50_000_000)
     assert job.input_ogm.shape == (10, 1, 64, 64)
+    assert job.input_generation == 0
     assert len(np.unique(job.history_stamp_ns)) == 10
     assert abs(job.anchor_stamp_ns - 900_000_000) <= 50_000_000
     assert job.target_stamp_ns == job.anchor_stamp_ns + 500_000_000

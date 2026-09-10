@@ -9,7 +9,7 @@ from launch.actions import (
     TimerAction)
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration, PythonExpression
+from launch.substitutions import EnvironmentVariable, LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 from launch_ros.descriptions import ParameterFile
 from launch_ros.parameter_descriptions import ParameterValue
@@ -18,7 +18,7 @@ from nav2_common.launch import RewrittenYaml
 
 def _configured_nav2_params(
         params_path, namespace, use_sim_time, scope_enabled, planner_mode,
-        fast2d_bt_xml, local_fast2d_mode=None):
+        fast2d_bt_xml, local_fast2d_mode=None, restricted_mppi_enabled=None):
     planner_plugin = PythonExpression([
         "'nav2_navfn_planner/NavfnPlanner' if '", planner_mode,
         "' == 'navfn' else 'm1_fast_planner::Fast2DPlanner'",
@@ -49,6 +49,10 @@ def _configured_nav2_params(
         # controller wrapper while preserving all MPPI parameters.
         rewrites["controller_server.ros__parameters.FollowPath.plugin"] = controller_plugin
         rewrites["controller_server.ros__parameters.FollowPath.local_fast2d.mode"] = local_fast2d_mode
+    if restricted_mppi_enabled is not None:
+        rewrites[
+            "controller_server.ros__parameters.FollowPath.restricted_mppi.enabled"
+        ] = restricted_mppi_enabled
     return ParameterFile(
         RewrittenYaml(
             source_file=params_path,
@@ -99,6 +103,7 @@ def generate_launch_description():
             bringup_share, "behavior_trees",
             "navigate_to_pose_fast2d_replanning.xml"),
         LaunchConfiguration("local_fast2d_mode"),
+        LaunchConfiguration("restricted_mppi_enabled"),
     )
     localization_params = ParameterFile(
         RewrittenYaml(
@@ -146,6 +151,7 @@ def generate_launch_description():
             "model_path": LaunchConfiguration("scope_model_path"),
             "device": LaunchConfiguration("scope_device"),
             "num_samples": LaunchConfiguration("scope_num_samples"),
+            "sequence_horizon_steps": LaunchConfiguration("scope_sequence_horizon_steps"),
             "evaluator_enabled": LaunchConfiguration("scope_evaluator_enabled"),
             "rviz": "false",
         }.items(),
@@ -326,7 +332,7 @@ def generate_launch_description():
         DeclareLaunchArgument("gui", default_value="true"),
         DeclareLaunchArgument("rviz", default_value="true"),
         DeclareLaunchArgument(
-            "nav2_rviz", default_value="true",
+            "nav2_rviz", default_value=LaunchConfiguration("rviz"),
             description="Start the top-level Nav2 RViz visualizer."),
         DeclareLaunchArgument(
             "rviz_start_delay",
@@ -392,14 +398,19 @@ def generate_launch_description():
         DeclareLaunchArgument(
             "local_fast2d_mode", default_value="off",
             description="Experimental local guide: off (native MPPI), shadow, or active."),
+        DeclareLaunchArgument(
+            "restricted_mppi_enabled", default_value="false",
+            description=(
+                "Enable Phase 6B restricted MPPI only with local_fast2d_mode:=active; "
+                "the default is the frozen official MPPI baseline.")),
         DeclareLaunchArgument("dynamic_test_sim_time_trigger", default_value="false"),
         DeclareLaunchArgument(
             "scope_model_path",
-            default_value=(
-                "/home/xinlei/Data/SCOPE-repro/reference/scope/"
-                "model/scope_model.pth")),
+            default_value=EnvironmentVariable(
+                "M1_SCOPE_MODEL_PATH", default_value="scope_model.pth")),
         DeclareLaunchArgument("scope_device", default_value="cuda"),
         DeclareLaunchArgument("scope_num_samples", default_value="4"),
+        DeclareLaunchArgument("scope_sequence_horizon_steps", default_value="2"),
         DeclareLaunchArgument("scope_evaluator_enabled", default_value="false"),
         DeclareLaunchArgument("autostart", default_value="true"),
         DeclareLaunchArgument("namespace", default_value=""),

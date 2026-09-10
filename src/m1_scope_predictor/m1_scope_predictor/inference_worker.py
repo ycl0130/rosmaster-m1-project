@@ -9,8 +9,8 @@ from .latest_mailbox import LatestMailbox
 @dataclass(frozen=True)
 class InferenceResult:
     job: object
-    mean: object = None
-    standard_deviation: object = None
+    means: object = None
+    standard_deviations: object = None
     latency_seconds: float = 0.0
     memory_bytes: int = 0
     error: Exception = None
@@ -47,11 +47,11 @@ class InferenceWorker:
             if job is None:
                 return
             try:
-                mean, standard_deviation, latency, memory = self.backend.infer(
+                means, standard_deviations, latency, memory = self.backend.infer_sequence(
                     job.input_ogm, self.horizon_steps, self.num_samples)
                 result = InferenceResult(
-                    job=job, mean=mean,
-                    standard_deviation=standard_deviation,
+                    job=job, means=means,
+                    standard_deviations=standard_deviations,
                     latency_seconds=float(latency), memory_bytes=int(memory))
             except Exception as error:  # keep failures out of the ROS executor
                 result = InferenceResult(job=job, error=error)

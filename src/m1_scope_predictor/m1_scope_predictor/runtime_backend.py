@@ -53,6 +53,14 @@ def aggregate_samples(samples):
     return samples.mean(axis=0), samples.std(axis=0)
 
 
+def aggregate_sequence_samples(samples_by_step):
+    """Aggregate independent MC samples without mixing autoregressive time."""
+    samples = np.asarray(samples_by_step, dtype=np.float32)
+    if samples.ndim != 5 or samples.shape[2:] != (1, 64, 64):
+        raise ValueError("sequence samples must have shape [T,N,1,64,64]")
+    return samples.mean(axis=1), samples.std(axis=1)
+
+
 class ScopeRuntimeBackend:
     """Load the frozen model lazily and run autoregressive MC inference."""
 
@@ -77,7 +85,7 @@ class ScopeRuntimeBackend:
         self.model.load_state_dict(state["model"], strict=True)
         self.model.eval()
 
-    def infer(self, input_ogm, horizon_steps=5, num_samples=4):
+    def infer_sequence(self, input_ogm, horizon_steps=5, num_samples=4):
         input_ogm = validate_model_input(input_ogm)
         if int(horizon_steps) < 1 or int(num_samples) < 1:
             raise ValueError("horizon_steps and num_samples must be positive")
@@ -90,15 +98,23 @@ class ScopeRuntimeBackend:
         if self.device.type == "cuda":
             torch.cuda.synchronize(self.device)
         started = time.perf_counter()
+        predictions = []
         with torch.inference_mode():
             for _ in range(int(horizon_steps)):
                 prediction, _ = self.model(inputs)
+                predictions.append(prediction)
                 inputs = torch.cat((inputs[:, 1:], prediction.unsqueeze(1)), dim=1)
         if self.device.type == "cuda":
             torch.cuda.synchronize(self.device)
         latency = time.perf_counter() - started
-        samples = prediction.detach().cpu().numpy().astype(np.float32)
-        mean, standard_deviation = aggregate_samples(samples)
+        samples = torch.stack(predictions, dim=0).detach().cpu().numpy().astype(np.float32)
+        mean, standard_deviation = aggregate_sequence_samples(samples)
         memory = (int(torch.cuda.memory_allocated(self.device))
                   if self.device.type == "cuda" else 0)
         return mean, standard_deviation, latency, memory
+
+    def infer(self, input_ogm, horizon_steps=5, num_samples=4):
+        """Legacy endpoint API retained for parity tooling and callers."""
+        mean, standard_deviation, latency, memory = self.infer_sequence(
+            input_ogm, horizon_steps, num_samples)
+        return mean[-1], standard_deviation[-1], latency, memory

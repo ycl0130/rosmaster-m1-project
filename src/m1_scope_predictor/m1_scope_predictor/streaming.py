@@ -36,6 +36,7 @@ class OdomSample:
 
 @dataclass(frozen=True)
 class InferenceJob:
+    input_generation: int
     anchor_stamp_ns: int
     target_stamp_ns: int
     history_stamp_ns: np.ndarray
@@ -53,7 +54,7 @@ def _points(sample):
 
 
 def build_job(scans, odometry, base_to_laser, anchor_target_ns,
-              horizon_seconds=0.5, tolerance_ns=50_000_000):
+              horizon_seconds=0.5, tolerance_ns=50_000_000, input_generation=0):
     """Select one deterministic history and build a latest inference job."""
     if len(scans) < SEQ_LEN:
         raise ValueError("history does not yet contain 10 scans")
@@ -91,6 +92,7 @@ def build_job(scans, odometry, base_to_laser, anchor_target_ns,
     current_grid = points_to_grid(point_sequences[-1])
     anchor_stamp = int(history_stamps[-1])
     return InferenceJob(
+        input_generation=int(input_generation),
         anchor_stamp_ns=anchor_stamp,
         target_stamp_ns=anchor_stamp + int(round(float(horizon_seconds) * 1e9)),
         history_stamp_ns=history_stamps.copy(),

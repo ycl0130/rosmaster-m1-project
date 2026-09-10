@@ -11,6 +11,7 @@ sys.path.insert(0, str(PACKAGE_ROOT))
 
 from m1_scope_predictor.runtime_backend import (  # noqa: E402
     aggregate_samples,
+    aggregate_sequence_samples,
     validate_model_input,
     verify_frozen_assets,
 )
@@ -43,6 +44,37 @@ def test_aggregate_samples_returns_pixel_mean_and_standard_deviation():
     mean, standard_deviation = aggregate_samples(samples)
     assert np.allclose(mean[0, :2, :2], [[0.5, 1.0], [0.5, 0.25]])
     assert np.allclose(standard_deviation[0, :2, :2], [[0.5, 0.0], [0.0, 0.25]])
+
+
+def test_aggregate_sequence_preserves_each_autoregressive_step():
+    samples = np.zeros((2, 2, 1, 64, 64), dtype=np.float32)
+    samples[0, :, 0, 0, 0] = [0.0, 0.4]
+    samples[1, :, 0, 0, 0] = [0.4, 1.0]
+    mean, standard_deviation = aggregate_sequence_samples(samples)
+    assert np.allclose(mean[:, 0, 0, 0], [0.2, 0.7])
+    assert np.allclose(standard_deviation[:, 0, 0, 0], [0.2, 0.3])
+
+
+@pytest.mark.parametrize("steps", [2, 5, 10, 20])
+def test_sequence_shape_and_legacy_step_two_selection(steps):
+    samples = np.zeros((steps, 2, 1, 64, 64), dtype=np.float32)
+    for step in range(steps):
+        samples[step, :, 0, 0, 0] = [float(step), float(step + 2)]
+    means, standard_deviations = aggregate_sequence_samples(samples)
+    assert means.shape == (steps, 1, 64, 64)
+    assert standard_deviations.shape == (steps, 1, 64, 64)
+    # Legacy is permanently index 1 (step 2), never the sequence endpoint.
+    assert means[1, 0, 0, 0] == 2.0
+    assert means[-1, 0, 0, 0] == float(steps)
+
+
+def test_step_two_of_long_rollout_equals_old_two_step_endpoint():
+    samples = np.zeros((20, 3, 1, 64, 64), dtype=np.float32)
+    samples[1, :, 0, 0, 0] = [0.1, 0.4, 0.7]
+    sequence_mean, sequence_std = aggregate_sequence_samples(samples)
+    old_mean, old_std = aggregate_samples(samples[1])
+    assert np.array_equal(sequence_mean[1], old_mean)
+    assert np.array_equal(sequence_std[1], old_std)
 
 
 def test_vendored_sources_match_frozen_upstream_hashes():

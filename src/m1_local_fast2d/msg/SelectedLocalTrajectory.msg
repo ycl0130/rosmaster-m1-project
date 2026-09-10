@@ -1,0 +1,23 @@
+std_msgs/Header header
+uint64 planning_result_id
+uint64 input_generation
+uint32 selected_candidate_index
+uint64 scope_prediction_id
+bool prediction_used
+bool switched
+bool selection_valid
+float32 selection_cost
+float32 selected_mean_risk
+float32 selected_max_risk
+float32 selected_coverage
+uint8 selection_reason
+TimedTrajectory trajectory
+
+uint8 FALLBACK_PRIMARY=0
+uint8 FALLBACK_NO_SCORE=1
+uint8 FALLBACK_SCORE_MISMATCH=2
+uint8 FALLBACK_STALE=3
+uint8 FALLBACK_LOW_COVERAGE=4
+uint8 FALLBACK_FRAME_MISMATCH=5
+uint8 SELECTED_PREDICTIVE=6
+uint8 CURRENT_ROUTE_UNAVAILABLE=7

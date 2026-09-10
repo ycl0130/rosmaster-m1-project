@@ -31,7 +31,9 @@ is external, hash-checked at startup, and is not committed to this repository.
 The costmap layer does not alter the official model or grid contract. SCOPE
 still consumes ten 10 Hz frames as `[N,10,1,64,64]`; each grid is 64 x 64 at
 0.1 m/cell with model axes x in `[0,6.4)` m and y in `[-3.2,3.2)` m. The
-default online prediction remains five autoregressive steps (0.5 s).
+default online prediction is two autoregressive steps (0.2 s); the parallel
+typed sequence can be configured from two to twenty steps without changing the
+legacy endpoint topics.
 
 ## Standalone use
 
@@ -46,11 +48,11 @@ Then start the observer and its dedicated RViz configuration:
 ```bash
 ros2 launch m1_scope_predictor scope_online.launch.py \
   use_sim_time:=true rviz:=true \
-  model_path:=/home/xinlei/Data/SCOPE-repro/reference/scope/model/scope_model.pth
+  model_path:=/actual/path/to/scope_model.pth
 ```
 
 The first prediction appears after the ten-frame history warms up. The default
-uses a 0.5 s horizon and four Monte Carlo samples. Full SCOPE prioritizes a
+uses a 0.2 s horizon and four Monte Carlo samples. Full SCOPE prioritizes a
 fresh latest result over processing every nominal 10 Hz job.
 
 To enable the Gazebo-only delayed evaluator, add
@@ -65,6 +67,12 @@ and MAE through `/scope/diagnostics`.
 - `/scope/prediction`: dense future occupancy probability mapped to `0..100`.
 - `/scope/uncertainty`: pixel standard deviation divided by `0.5`, clipped,
   and mapped to `0..100` for transport and display.
+- `/scope/prediction_sequence`: atomic typed `ScopePredictionSequence` with
+  one probability/uncertainty pair per 0.1 s autoregressive step. Its header
+  is the observation anchor; each slice grid is stamped anchor plus its
+  `time_from_start`. `sequence_horizon_steps` defaults to 2 and may be 2..20.
+  `/scope/prediction` and `/scope/uncertainty` always remain step 2 (t+0.2 s),
+  even if this parallel sequence is extended.
 - `/scope/diagnostics`: history state, inference latency, result age, output
   rate, dropped jobs, allocated CUDA memory, and optional evaluator metrics.
 

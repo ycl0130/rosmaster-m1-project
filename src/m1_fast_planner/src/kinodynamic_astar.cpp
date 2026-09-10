@@ -298,6 +298,7 @@ SearchResult KinodynamicAstar::search(
   }
   result.telemetry.success = true;
   result.telemetry.trajectory_duration = terminal.time_from_start;
+  result.telemetry.trajectory_cost = terminal.g;
   result.telemetry.goal_position_error = positionError(terminal.state, goal);
   result.telemetry.goal_speed = speed(terminal.state);
   for (const auto & point : result.trajectory) {

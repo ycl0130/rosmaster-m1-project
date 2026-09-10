@@ -1,0 +1,13 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>m1_scope_risk</name>
+  <version>0.1.0</version>
+  <description>C++ query library for time-indexed SCOPE risk fields.</description>
+  <maintainer email="user@example.com">Rosmaster user</maintainer>
+  <license>Apache-2.0</license>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <depend>m1_scope_msgs</depend>
+  <depend>nav_msgs</depend>
+  <test_depend>ament_cmake_gtest</test_depend>
+  <export><build_type>ament_cmake</build_type></export>
+</package>

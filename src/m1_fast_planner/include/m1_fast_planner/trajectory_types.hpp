@@ -35,6 +35,7 @@ struct SearchTelemetry
   std::size_t expanded_nodes{0};
   std::size_t generated_nodes{0};
   double trajectory_duration{0.0};
+  double trajectory_cost{0.0};
   double max_speed{0.0};
   double max_acceleration{0.0};
   double max_abs_vx{0.0};

@@ -1,0 +1,16 @@
+uint64 planning_result_id
+uint32 candidate_index
+uint64 scope_prediction_id
+float32 max_risk
+float32 mean_risk
+float32 integrated_risk
+float32 high_risk_fraction
+builtin_interfaces/Duration first_high_risk_time
+bool has_high_risk
+float32 trajectory_duration
+float32 prediction_covered_duration
+float32 coverage_ratio
+uint32 valid_query_count
+uint32 missing_query_count
+bool score_valid
+bool coverage_sufficient

@@ -13,9 +13,9 @@ from m1_scope_predictor.latest_mailbox import LatestMailbox  # noqa: E402
 
 
 class Backend:
-    def infer(self, input_ogm, horizon_steps, num_samples):
+    def infer_sequence(self, input_ogm, horizon_steps, num_samples):
         value = float(input_ogm[0, 0, 0, 0])
-        grid = np.full((1, 64, 64), value, dtype=np.float32)
+        grid = np.full((horizon_steps, 1, 64, 64), value, dtype=np.float32)
         return grid, np.zeros_like(grid), 0.01, 123
 
 
@@ -43,13 +43,13 @@ def test_worker_returns_backend_result_without_blocking_caller():
     worker.stop()
     assert result.error is None
     assert result.job.input_ogm[0, 0, 0, 0] == 0.25
-    assert result.mean[0, 0, 0] == 0.25
+    assert result.means[0, 0, 0, 0] == 0.25
     assert result.memory_bytes == 123
 
 
 def test_worker_converts_backend_exception_to_error_result():
     class BrokenBackend:
-        def infer(self, *args, **kwargs):
+        def infer_sequence(self, *args, **kwargs):
             raise RuntimeError("inference failed")
 
     output = LatestMailbox()
@@ -59,4 +59,4 @@ def test_worker_converts_backend_exception_to_error_result():
     result = wait_result(output)
     worker.stop()
     assert isinstance(result.error, RuntimeError)
-    assert result.mean is None
+    assert result.means is None

@@ -208,12 +208,28 @@ TEST(KinodynamicAstar, ReconstructedTrajectoryIsFiniteAndTimeOrdered)
       [](double, double) {return true;});
   ASSERT_TRUE(result.telemetry.success);
   double last_time = -1.0;
-  for (const auto & point : result.trajectory) {
+  for (std::size_t i = 0; i < result.trajectory.size(); ++i) {
+    const auto & point = result.trajectory[i];
     EXPECT_TRUE(std::isfinite(point.state.px));
     EXPECT_TRUE(std::isfinite(point.state.py));
     EXPECT_TRUE(std::isfinite(point.state.vx));
     EXPECT_TRUE(std::isfinite(point.state.vy));
+    EXPECT_TRUE(std::isfinite(point.acceleration.ax));
+    EXPECT_TRUE(std::isfinite(point.acceleration.ay));
     EXPECT_GE(point.time_from_start, last_time);
+    if (i > 0) {
+      const auto & previous = result.trajectory[i - 1];
+      const double dt = point.time_from_start - previous.time_from_start;
+      // Acceleration is the incoming control of the sample.  A zero-duration
+      // terminal connector is geometric only and is not dynamically checked.
+      if (dt > 1e-12) {
+        const auto expected = KinodynamicAstar::propagate(previous.state, point.acceleration, dt);
+        EXPECT_NEAR(point.state.px, expected.px, 1e-10);
+        EXPECT_NEAR(point.state.py, expected.py, 1e-10);
+        EXPECT_NEAR(point.state.vx, expected.vx, 1e-10);
+        EXPECT_NEAR(point.state.vy, expected.vy, 1e-10);
+      }
+    }
     last_time = point.time_from_start;
   }
 }

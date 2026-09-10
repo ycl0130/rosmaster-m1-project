@@ -1,0 +1,8 @@
+std_msgs/Header header
+uint64 planning_result_id
+uint32 selected_candidate_index
+uint32 previous_matched_candidate_index
+bool prediction_used
+float32 switch_margin
+uint8 selection_reason
+SelectionCandidateDiagnostic[] candidates

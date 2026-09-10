@@ -1,0 +1,8 @@
+uint32 candidate_index
+uint32 candidate_rank
+bool valid
+float64 planner_cost
+float64 duration
+float64 generation_latency_ms
+float64 minimum_diversity
+TimedTrajectory trajectory

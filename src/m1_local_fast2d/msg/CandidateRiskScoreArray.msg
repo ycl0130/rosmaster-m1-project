@@ -1,0 +1,6 @@
+std_msgs/Header header
+uint64 planning_result_id
+uint64 scope_prediction_id
+builtin_interfaces/Time scope_anchor_stamp
+float32 pairing_age_ms
+CandidateRiskScore[] scores

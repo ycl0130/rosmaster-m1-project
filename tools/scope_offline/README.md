@@ -29,8 +29,8 @@ compensated into the predicted future lidar frame; the target is the directly ob
 conda run -n scope-repro /usr/bin/env PYTHONDONTWRITEBYTECODE=1 \
   python tools/scope_offline/evaluate_pretrained.py \
   --dataset artifacts/scope_m1/preprocessed/scope_h05.npz \
-  --scope-root /home/xinlei/Data/SCOPE-repro/reference/scope \
-  --checkpoint /home/xinlei/Data/SCOPE-repro/reference/scope/model/scope_model.pth \
+  --scope-root /actual/path/to/SCOPE-repro/reference/scope \
+  --checkpoint /actual/path/to/scope_model.pth \
   --horizon 5 --num-samples 32 --max-windows 200 --min-windows 100 \
   --threshold 0.5 --seed 1337 --device auto \
   --output-dir artifacts/scope_m1/evaluation/h05

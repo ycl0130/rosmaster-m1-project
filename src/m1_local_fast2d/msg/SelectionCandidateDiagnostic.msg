@@ -1,0 +1,6 @@
+uint32 candidate_index
+bool usable
+bool matches_previous_route
+float32 raw_cost
+float32 switch_penalty
+float32 final_cost

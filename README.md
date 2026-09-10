@@ -7,7 +7,7 @@
 ## 构建
 
 ```bash
-cd /home/xinlei/Data/ROS/rosmaster-m1-project
+cd /path/to/rosmaster-m1-project
 source /opt/ros/humble/setup.bash
 
 sudo apt update
@@ -22,7 +22,7 @@ unset PYTHONPATH
 /usr/bin/colcon build --packages-select \
   yahboomcar_description m1_nav2_support m1_nav2_bringup imperative_navigation \
   --symlink-install
-source /home/xinlei/Data/ROS/rosmaster-m1-project/install/setup.bash
+source install/setup.bash
 ```
 
 ## Python 与 PyTorch 运行环境
@@ -33,8 +33,7 @@ PyTorch 和 NumPy。不要直接用 Python 3.12 的 Conda 环境加载 ROS 2 节
 ```bash
 conda activate pendulum-rl
 source /opt/ros/humble/setup.bash
-source /home/xinlei/Data/ROS/rosmaster-m1-project/install/setup.bash
-export PYTHONPATH=/home/xinlei/Data/robotics_ws/miniconda3/envs/pendulum-rl/lib/python3.10/site-packages${PYTHONPATH:+:$PYTHONPATH}
+source install/setup.bash
 
 /usr/bin/python3 -c "import torch, numpy, rclpy; print('torch:', torch.__version__); print('numpy:', numpy.__version__); print('rclpy: ok')"
 ```
