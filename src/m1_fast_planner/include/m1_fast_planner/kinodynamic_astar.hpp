@@ -26,10 +26,12 @@ struct KinodynamicAstarConfig
   int max_expansions{20000};
   double time_cost_weight{1.0};
   double control_cost_weight{0.1};
+  double local_costmap_cost_weight{0.0};
   double path_resolution{0.05};
 };
 
 using CollisionChecker = std::function<bool(double, double)>;
+using TraversalCostChecker = std::function<double(double, double)>;
 
 class KinodynamicAstar
 {
@@ -42,7 +44,8 @@ public:
   static long long quantize(double value, double resolution);
 
   SearchResult search(
-    const PlanarState & start, const PlanarState & goal, const CollisionChecker & collision_free) const;
+    const PlanarState & start, const PlanarState & goal, const CollisionChecker & collision_free,
+    const TraversalCostChecker & traversal_cost = {}) const;
 
 private:
   KinodynamicAstarConfig config_;

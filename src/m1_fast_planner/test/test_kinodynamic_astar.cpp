@@ -183,6 +183,24 @@ TEST(KinodynamicAstar, EqualInputProducesDeterministicTrajectory)
   }
 }
 
+TEST(KinodynamicAstar, OptionalSoftTraversalCostChangesOnlyLocalObjective)
+{
+  auto config = testConfig();
+  config.local_costmap_cost_weight = 8.0;
+  KinodynamicAstar planner(config);
+  const auto free = [](double x, double y) {
+      return x >= -3.0 && x <= 3.0 && y >= -3.0 && y <= 3.0;
+    };
+  // A high-risk central strip is traversable, not lethal. The local objective
+  // must nevertheless prefer one of the free side corridors.
+  const auto result = planner.search({-1.5, 0.0, 0.0, 0.0}, {1.5, 0.0, 0.0, 0.0}, free,
+      [](double x, double y) {return std::abs(x) < 0.5 && std::abs(y) < 0.20 ? 10.0 : 0.0;});
+  ASSERT_TRUE(result.telemetry.success);
+  EXPECT_TRUE(std::any_of(result.trajectory.begin(), result.trajectory.end(), [](const auto & point) {
+      return std::abs(point.state.py) > 0.20;
+    }));
+}
+
 TEST(KinodynamicAstar, ReconstructedTrajectoryIsFiniteAndTimeOrdered)
 {
   KinodynamicAstar planner(testConfig());

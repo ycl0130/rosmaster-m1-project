@@ -1,0 +1,5 @@
+<library path="m1_local_fast2d">
+  <class name="m1_local_fast2d::HybridController" type="m1_local_fast2d::HybridController" base_class_type="nav2_core::Controller">
+    <description>Latest-only SCOPE-aware local Fast2D guide wrapper for stock MPPI.</description>
+  </class>
+</library>

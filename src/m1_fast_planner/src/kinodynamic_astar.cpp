@@ -117,7 +117,8 @@ bool KinodynamicAstar::validConfig(const KinodynamicAstarConfig & c)
          c.velocity_resolution > 0.0 && c.goal_position_tolerance >= 0.0 &&
          c.goal_velocity_tolerance >= 0.0 && c.search_timeout_ms > 0 &&
          c.max_expansions > 0 && c.time_cost_weight >= 0.0 &&
-         c.control_cost_weight >= 0.0 && c.path_resolution > 0.0;
+         c.control_cost_weight >= 0.0 && c.local_costmap_cost_weight >= 0.0 &&
+         c.path_resolution > 0.0;
 }
 
 long long KinodynamicAstar::quantize(double value, double resolution)
@@ -126,7 +127,8 @@ long long KinodynamicAstar::quantize(double value, double resolution)
 }
 
 SearchResult KinodynamicAstar::search(
-  const PlanarState & start, const PlanarState & goal, const CollisionChecker & collision_free) const
+  const PlanarState & start, const PlanarState & goal, const CollisionChecker & collision_free,
+  const TraversalCostChecker & traversal_cost) const
 {
   if (!finiteState(start) || !finiteState(goal) || !collision_free) {
     throw std::invalid_argument("search requires finite states and a collision checker");
@@ -146,10 +148,11 @@ SearchResult KinodynamicAstar::search(
       const double y_time = std::abs(goal.py - state.py) / config_.max_velocity_y;
       return config_.time_cost_weight * std::max(x_time, y_time);
     };
-  const auto collision_free_primitive = [this, &collision_free](
+  const auto primitive_cost = [this, &collision_free, &traversal_cost](
       const PlanarState & state, const PlanarAcceleration & acceleration) {
       PlanarState previous = state;
       double time = 0.0;
+      double integrated_cost = 0.0;
       while (time < config_.primitive_duration - 1e-9) {
         const double remaining = config_.primitive_duration - time;
         const double velocity_bound = std::max(1e-3, speed(previous) +
@@ -159,11 +162,18 @@ SearchResult KinodynamicAstar::search(
         time += step;
         const auto sample = propagate(state, acceleration, time);
         if (!collision_free(sample.px, sample.py)) {
-          return false;
+          return std::numeric_limits<double>::infinity();
+        }
+        if (traversal_cost) {
+          const double cost = traversal_cost(sample.px, sample.py);
+          if (!std::isfinite(cost) || cost < 0.0) {
+            return std::numeric_limits<double>::infinity();
+          }
+          integrated_cost += cost * step;
         }
         previous = sample;
       }
-      return true;
+      return integrated_cost;
     };
   const auto connector_is_free = [this, &collision_free](const PlanarState & from,
       const PlanarState & to) {
@@ -238,13 +248,14 @@ SearchResult KinodynamicAstar::search(
       if (!finiteState(next) ||
         !velocity_component_valid(node.state.vx, next.vx, config_.max_velocity_x) ||
         !velocity_component_valid(node.state.vy, next.vy, config_.max_velocity_y) ||
-        !collision_free_primitive(node.state, control))
+        !std::isfinite(primitive_cost(node.state, control)))
       {
         continue;
       }
       const double edge = config_.time_cost_weight * config_.primitive_duration +
         config_.control_cost_weight * (control.ax * control.ax + control.ay * control.ay) *
-        config_.primitive_duration;
+        config_.primitive_duration +
+        config_.local_costmap_cost_weight * primitive_cost(node.state, control);
       const double g = node.g + edge;
       const auto key = make_key(next);
       const auto previous = best_g.find(key);

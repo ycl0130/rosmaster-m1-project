@@ -36,6 +36,15 @@ def stop_process_group(process):
             pass
 
 
+def process_group_gone(process):
+    """Reap a child and report only the process group this runner created."""
+    try:
+        process.wait(timeout=0.1)
+    except subprocess.TimeoutExpired:
+        return False
+    return True
+
+
 def state(stage, **extra):
     OUT.mkdir(parents=True, exist_ok=True)
     write_json(OUT / "STATE.json", {"current_stage": stage, "updated_unix_s": time.time(), **extra})
@@ -48,13 +57,14 @@ def environment(index, name):
     domain = DOMAIN_BASE + (index % 80)
     partition = f"fast2d_run_{int(time.time())}_{index}_{name}".replace("/", "_")
     env = os.environ.copy()
-    env.update({"ROS_DOMAIN_ID": str(domain), "IGN_PARTITION": partition, "GZ_PARTITION": partition})
+    env.update({"ROS_DOMAIN_ID": str(domain), "IGN_PARTITION": partition, "GZ_PARTITION": partition,
+                "ROS_LOCALHOST_ONLY": "1"})
     return env, domain, partition
 
 
 def one(mode, name, index, dynamic=False, seed=None, action="fixed", retries=3,
         x=2.5, y=1.5, yaw=0.0, motion_mode="continuous", scope_enabled=False,
-        scope_model_path=None):
+        scope_model_path=None, local_fast2d_mode="off"):
     case_dir = OUT / name
     case_dir.mkdir(parents=True, exist_ok=True)
     for attempt in range(retries):
@@ -82,17 +92,29 @@ def one(mode, name, index, dynamic=False, seed=None, action="fixed", retries=3,
                   "gui:=false", "rviz:=false", "software_lidar:=true",
                   f"dynamic_obstacles:={str(dynamic).lower()}",
                   f"scope_enabled:={str(scope_enabled).lower()}",
-                  f"planner_mode:={mode}", f"dynamic_motion_mode:={motion_mode}"]
+                  f"planner_mode:={mode}", f"local_fast2d_mode:={local_fast2d_mode}",
+                  f"dynamic_motion_mode:={motion_mode}"]
         if scope_model_path:
             launch.append(f"scope_model_path:={scope_model_path}")
         if seed is not None:
             launch.append(f"dynamic_seed:={seed}")
         launch_command = " ".join(subprocess.list2cmdline([item]) for item in launch)
         state("launching", current_case=name, ROS_DOMAIN_ID=domain, IGN_PARTITION=partition)
+        validator = None
         with (run_dir / "launch.log").open("w") as log:
             process = subprocess.Popen(sourced(launch_command), cwd=ROOT, env=env, stdout=log,
                                        stderr=subprocess.STDOUT, start_new_session=True)
             try:
+                # The validator is a passive subscriber in the same isolated DDS
+                # domain.  It starts before readiness / the goal so volatile
+                # observer topics cannot lose the first accepted pair.
+                validator_command = " ".join(subprocess.list2cmdline([item]) for item in [
+                    "ros2", "run", "m1_nav2_bringup", "m1_local_fast2d_guide_validator",
+                    "--output", str(run_dir / "validator.json"), "--seconds", "220"])
+                with (run_dir / "validator.log").open("w") as validator_log:
+                    validator = subprocess.Popen(sourced(validator_command), cwd=ROOT, env=env,
+                                                 stdout=validator_log, stderr=subprocess.STDOUT,
+                                                 start_new_session=True)
                 probe = ["python3", "tools/diagnostics/fast2d_single_plan_probe.py",
                          "--output", str(run_dir / "result.json"),
                          "--path-output", str(run_dir / "path.json"), "--action", action,
@@ -114,13 +136,29 @@ def one(mode, name, index, dynamic=False, seed=None, action="fixed", retries=3,
             except Exception as error:
                 (run_dir / "runner_error.txt").write_text(repr(error))
             finally:
+                if validator is not None:
+                    # Give asynchronous accepted_path/costmap/diagnostic traffic
+                    # a bounded chance to reach the passive observer, then force
+                    # its save/finally path before stack teardown.
+                    try:
+                        validator.wait(timeout=2.0)
+                    except subprocess.TimeoutExpired:
+                        stop_process_group(validator)
                 stop_process_group(process)
         result_path = run_dir / "result.json"
         report = json.loads(result_path.read_text()) if result_path.exists() else {"error": "no result"}
         report["environment"] = metadata
+        validator_path = run_dir / "validator.json"
+        report["exact_snapshot_validator"] = (
+            json.loads(validator_path.read_text()) if validator_path.exists()
+            else {"error": "validator produced no result"})
+        report["cleanup"] = {
+            "launch_process_group_gone": process_group_gone(process),
+            "validator_process_group_gone": validator is None or process_group_gone(validator),
+        }
         write_json(run_dir / "result.json", report)
         write_json(case_dir / "result.json", report)
-        if report.get("environment_status") == "ENVIRONMENT_INVALID" and attempt + 1 < retries:
+        if report.get("environment_status") in {"ENVIRONMENT_INVALID", "READINESS_TIMEOUT"} and attempt + 1 < retries:
             continue
         state("case_complete", last_completed_test=name, last_result=report,
               next_test="caller queue", ROS_DOMAIN_ID=domain, IGN_PARTITION=partition)
@@ -142,12 +180,14 @@ def main():
     parser.add_argument("--motion-mode", default="continuous")
     parser.add_argument("--scope-enabled", action="store_true")
     parser.add_argument("--scope-model-path")
+    parser.add_argument("--local-fast2d-mode", choices=["off", "shadow", "active"], default="off")
     args = parser.parse_args()
     print(json.dumps(one(args.mode, args.name, args.index, args.dynamic, args.seed, args.action,
                          x=args.x, y=args.y, yaw=args.yaw,
                          motion_mode=args.motion_mode,
                          scope_enabled=args.scope_enabled,
-                         scope_model_path=args.scope_model_path), indent=2))
+                         scope_model_path=args.scope_model_path,
+                         local_fast2d_mode=args.local_fast2d_mode), indent=2))
 
 
 if __name__ == "__main__":

@@ -18,7 +18,7 @@ from nav2_common.launch import RewrittenYaml
 
 def _configured_nav2_params(
         params_path, namespace, use_sim_time, scope_enabled, planner_mode,
-        fast2d_bt_xml):
+        fast2d_bt_xml, local_fast2d_mode=None):
     planner_plugin = PythonExpression([
         "'nav2_navfn_planner/NavfnPlanner' if '", planner_mode,
         "' == 'navfn' else 'm1_fast_planner::Fast2DPlanner'",
@@ -28,11 +28,11 @@ def _configured_nav2_params(
         "navigate_to_pose_w_replanning_and_recovery.xml' if '", planner_mode,
         "' == 'navfn' else '", fast2d_bt_xml, "'",
     ])
-    return ParameterFile(
-        RewrittenYaml(
-            source_file=params_path,
-            root_key=namespace,
-            param_rewrites={
+    controller_plugin = PythonExpression([
+        "'nav2_mppi_controller::MPPIController' if '", local_fast2d_mode or "off",
+        "' == 'off' else 'm1_local_fast2d::HybridController'",
+    ])
+    rewrites = {
                 "use_sim_time": use_sim_time,
                 (
                     "local_costmap.local_costmap.ros__parameters."
@@ -43,7 +43,17 @@ def _configured_nav2_params(
                 # behavior, but asks for the global kinodynamic path at 2 Hz.
                 # NavFn keeps Humble's stock 1 Hz tree unchanged.
                 "bt_navigator.ros__parameters.default_nav_to_pose_bt_xml": nav_to_pose_tree,
-            },
+    }
+    if local_fast2d_mode is not None:
+        # Off uses native MPPI exactly; shadow/active select the thin
+        # controller wrapper while preserving all MPPI parameters.
+        rewrites["controller_server.ros__parameters.FollowPath.plugin"] = controller_plugin
+        rewrites["controller_server.ros__parameters.FollowPath.local_fast2d.mode"] = local_fast2d_mode
+    return ParameterFile(
+        RewrittenYaml(
+            source_file=params_path,
+            root_key=namespace,
+            param_rewrites=rewrites,
             convert_types=True,
         ),
         allow_substs=True,
@@ -55,6 +65,13 @@ def _validate_planner_mode(context):
     if mode not in {"navfn", "fast2d"}:
         raise RuntimeError(
             "planner_mode must be either 'navfn' or 'fast2d'; got %r" % mode)
+    return []
+
+
+def _validate_local_fast2d_mode(context):
+    mode = LaunchConfiguration("local_fast2d_mode").perform(context)
+    if mode not in {"off", "shadow", "active"}:
+        raise RuntimeError("local_fast2d_mode must be off, shadow, or active; got %r" % mode)
     return []
 
 
@@ -81,6 +98,7 @@ def generate_launch_description():
         os.path.join(
             bringup_share, "behavior_trees",
             "navigate_to_pose_fast2d_replanning.xml"),
+        LaunchConfiguration("local_fast2d_mode"),
     )
     localization_params = ParameterFile(
         RewrittenYaml(
@@ -109,6 +127,7 @@ def generate_launch_description():
                     "dynamic_obstacles": LaunchConfiguration("dynamic_obstacles"),
                     "dynamic_seed": LaunchConfiguration("dynamic_seed"),
                     "dynamic_motion_mode": LaunchConfiguration("dynamic_motion_mode"),
+                    "dynamic_test_sim_time_trigger": LaunchConfiguration("dynamic_test_sim_time_trigger"),
                     "render_engine": LaunchConfiguration("render_engine"),
                     "gpu_lidar_min_angle": LaunchConfiguration("gpu_lidar_min_angle"),
                     "gpu_lidar_max_angle": LaunchConfiguration("gpu_lidar_max_angle"),
@@ -360,10 +379,20 @@ def generate_launch_description():
         DeclareLaunchArgument("use_sim_time", default_value="true"),
         DeclareLaunchArgument("scope_enabled", default_value="false"),
         DeclareLaunchArgument(
+            "scope_start_delay", default_value="28.0",
+            description=(
+                "Delay observer-only SCOPE startup until the velocity "
+                "smoother and collision monitor lifecycle transitions have "
+                "completed.")),
+        DeclareLaunchArgument(
             "planner_mode", default_value="navfn",
             description=(
                 "GridBased implementation: navfn for the frozen baseline or "
                 "fast2d for the Phase 1A smoke planner.")),
+        DeclareLaunchArgument(
+            "local_fast2d_mode", default_value="off",
+            description="Experimental local guide: off (native MPPI), shadow, or active."),
+        DeclareLaunchArgument("dynamic_test_sim_time_trigger", default_value="false"),
         DeclareLaunchArgument(
             "scope_model_path",
             default_value=(
@@ -380,8 +409,17 @@ def generate_launch_description():
 
     return LaunchDescription(arguments + [
         OpaqueFunction(function=_validate_planner_mode),
+        OpaqueFunction(function=_validate_local_fast2d_mode),
         gazebo,
-        scope_observer,
+        # SCOPE is strictly an observer, but loading its CUDA model can delay
+        # executor scheduling long enough for Humble's lifecycle transition
+        # service client to abandon velocity_smoother/configure. Bring the
+        # safety chain up first; the scope layer accepts a late first grid.
+        # This is ordering only: it does not alter SCOPE inputs or Nav2
+        # command/safety wiring.
+        TimerAction(
+            period=LaunchConfiguration("scope_start_delay"),
+            actions=[scope_observer]),
         scan_relay,
         map_server,
         amcl,

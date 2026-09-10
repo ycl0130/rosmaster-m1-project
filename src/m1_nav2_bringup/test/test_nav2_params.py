@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 import yaml
 from launch import LaunchContext
-from launch.actions import IncludeLaunchDescription
+from launch.actions import IncludeLaunchDescription, TimerAction
 from launch.substitutions import LaunchConfiguration
 
 
@@ -148,13 +148,15 @@ def test_scope_enabled_drives_predictor_and_only_the_local_scope_layer(
     )
 
     launch_description = launch_module.generate_launch_description()
-    scope_includes = [
-        action
-        for action in launch_description.entities
-        if isinstance(action, IncludeLaunchDescription)
+    scope_timers = [
+        action for action in launch_description.entities
+        if isinstance(action, TimerAction)
+        and any(isinstance(child, IncludeLaunchDescription) for child in action.actions)
     ]
-    assert len(scope_includes) == 1
-    scope_observer = scope_includes[0]
+    assert len(scope_timers) == 1
+    scope_observer = next(
+        child for child in scope_timers[0].actions
+        if isinstance(child, IncludeLaunchDescription))
 
     original = yaml.safe_load(PARAMS.read_text())
     for enabled in ("false", "true"):
@@ -267,6 +269,40 @@ def test_invalid_planner_mode_is_rejected_early():
     context.launch_configurations["planner_mode"] = "invalid"
     with pytest.raises(RuntimeError, match="planner_mode"):
         launch_module._validate_planner_mode(context)
+
+
+def test_local_fast2d_mode_keeps_native_mppi_off_and_selects_wrapper(monkeypatch, tmp_path):
+    monkeypatch.setenv("ROS_LOG_DIR", str(tmp_path / "ros-log"))
+    launch_module = load_gazebo_launch_module()
+    for mode, plugin in (
+        ("off", "nav2_mppi_controller::MPPIController"),
+        ("shadow", "m1_local_fast2d::HybridController"),
+        ("active", "m1_local_fast2d::HybridController"),
+    ):
+        context = LaunchContext()
+        context.launch_configurations.update({
+            "namespace": "", "params_file": str(PARAMS), "scope_enabled": "false",
+            "planner_mode": "fast2d", "local_fast2d_mode": mode,
+            "use_sim_time": "true",
+        })
+        configured = launch_module._configured_nav2_params(
+            LaunchConfiguration("params_file"), LaunchConfiguration("namespace"),
+            LaunchConfiguration("use_sim_time"), LaunchConfiguration("scope_enabled"),
+            LaunchConfiguration("planner_mode"), "/tmp/tree.xml",
+            LaunchConfiguration("local_fast2d_mode"))
+        rewritten = yaml.safe_load(configured.evaluate(context).read_text())
+        configured.cleanup()
+        follow_path = rewritten["controller_server"]["ros__parameters"]["FollowPath"]
+        assert follow_path["plugin"] == plugin
+        assert follow_path["local_fast2d"]["mode"] == mode
+
+
+def test_invalid_local_fast2d_mode_is_rejected_early():
+    launch_module = load_gazebo_launch_module()
+    context = LaunchContext()
+    context.launch_configurations["local_fast2d_mode"] = "unsafe"
+    with pytest.raises(RuntimeError, match="local_fast2d_mode"):
+        launch_module._validate_local_fast2d_mode(context)
 
 
 def test_fast2d_kinodynamic_defaults_stay_within_downstream_envelope():

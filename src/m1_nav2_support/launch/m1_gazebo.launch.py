@@ -173,6 +173,7 @@ def generate_launch_description():
             "enabled": LaunchConfiguration("dynamic_obstacles"),
             "random_seed": LaunchConfiguration("dynamic_seed"),
             "motion_mode": LaunchConfiguration("dynamic_motion_mode"),
+            "test_sim_time_trigger": LaunchConfiguration("dynamic_test_sim_time_trigger"),
         }],
     )
 
@@ -260,6 +261,8 @@ def generate_launch_description():
             description=(
                 "Obstacle motion: continuous smooth-random motion or "
                 "random_waypoint for waypoint patrol.")),
+        DeclareLaunchArgument("dynamic_test_sim_time_trigger", default_value="false",
+            description="Test-only crossing trigger from causality T0 and /clock."),
         DeclareLaunchArgument("slip_enabled", default_value="true"),
         DeclareLaunchArgument("slip_profile", default_value="none"),
         DeclareLaunchArgument("slip_seed", default_value="20260902"),

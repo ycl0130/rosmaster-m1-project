@@ -29,9 +29,11 @@
   <exec_depend>nav2_smoother</exec_depend>
   <exec_depend>nav2_velocity_smoother</exec_depend>
   <exec_depend>m1_scope_predictor</exec_depend>
+  <exec_depend>m1_local_fast2d</exec_depend>
   <exec_depend>nav2_waypoint_follower</exec_depend>
   <exec_depend>nav2_bringup</exec_depend>
   <exec_depend>rclpy</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
   <exec_depend>robot_state_publisher</exec_depend>
   <exec_depend>ros_gz_bridge</exec_depend>
   <exec_depend>ros_gz_sim</exec_depend>

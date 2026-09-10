@@ -143,6 +143,16 @@ controller_server:
       yaw_goal_tolerance: 0.40
     FollowPath:
       plugin: nav2_mppi_controller::MPPIController
+      # Launch retains native MPPI when this is off. Shadow/active replace
+      # only this plugin boundary with HybridController, which instantiates
+      # the same official MPPI implementation using the untouched settings.
+      local_fast2d:
+        mode: off
+        update_rate: 8.0
+        path_stale_timeout: 0.5
+        lookahead_distance: 2.0
+        local_costmap_cost_weight: 2.0
+        allow_unknown: true
       # M1 is mecanum-drive, so MPPI samples longitudinal, lateral and
       # rotational velocity together using the omni motion model.
       motion_model: Omni

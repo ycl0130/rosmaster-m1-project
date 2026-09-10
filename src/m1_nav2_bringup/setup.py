@@ -30,6 +30,8 @@ setup(
         "console_scripts": [
             "initial_pose_publisher = m1_nav2_bringup.initial_pose_publisher:main",
             "scan_relay = m1_nav2_bringup.scan_relay:main",
+            "m1_phase3_recorder = m1_nav2_bringup.phase3_recorder:main",
+            "m1_local_fast2d_guide_validator = m1_nav2_bringup.guide_validator:main",
         ],
     },
 )

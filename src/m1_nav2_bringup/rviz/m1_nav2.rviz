@@ -54,6 +54,16 @@ Visualization Manager:
       Enabled: true
       Name: Global Plan
       Topic: /plan
+    - Class: rviz_default_plugins/Path
+      Color: 0; 180; 255
+      Enabled: true
+      Name: Local Fast2D Guide
+      Topic: /local_fast2d/path
+    - Class: rviz_default_plugins/Path
+      Color: 255; 180; 0
+      Enabled: true
+      Name: Local Fast2D Goal
+      Topic: /local_fast2d/local_goal
     - Alpha: 0.55
       Class: rviz_default_plugins/Map
       Color Scheme: costmap

@@ -14,6 +14,7 @@ from rclpy.node import Node
 from ros_gz_interfaces.msg import Entity
 from ros_gz_interfaces.srv import SetEntityPose
 from tf2_msgs.msg import TFMessage
+from std_msgs.msg import String
 
 
 class DynamicObstacleMover(Node):
@@ -29,6 +30,10 @@ class DynamicObstacleMover(Node):
         self.declare_parameter("obstacle_topic", "/m1/dynamic_obstacles")
         self.declare_parameter("pose_publish_period", 1.0 / 30.0)
         self.declare_parameter("gazebo_pose_topic", "/m1/gazebo_dynamic_tf")
+        # Causality harness only: an epoch is announced on this test topic;
+        # crossing is then governed exclusively by ROS simulation time.
+        self.declare_parameter("test_sim_time_trigger", False)
+        self.declare_parameter("test_state_topic", "/local_fast2d_test/state")
 
         self.period = float(self.get_parameter("control_period").value)
         self.enabled = bool(self.get_parameter("enabled").value)
@@ -76,6 +81,8 @@ class DynamicObstacleMover(Node):
         self.crossing_initialized = False
         self.crossing_pose_confirmed = False
         self.crossing_started = False
+        self.test_sim_time_trigger = bool(self.get_parameter("test_sim_time_trigger").value)
+        self.test_epoch_ns = None
 
         # Gazebo's VelocityControl system owns the continuous motion.  The
         # controller sends a direction at a modest ROS rate, while Gazebo
@@ -86,7 +93,12 @@ class DynamicObstacleMover(Node):
                 Twist, f"/model/{obstacle['name']}/cmd_vel", 10)
             for obstacle in self.obstacles
         }
-        self.create_subscription(Twist, "/cmd_vel", self.cmd_vel_callback, 10)
+        if self.test_sim_time_trigger:
+            self.create_subscription(String, self.get_parameter("test_state_topic").value,
+                                     self.test_state_callback, 10)
+        else:
+            # Preserve the production crossing behavior unchanged.
+            self.create_subscription(Twist, "/cmd_vel", self.cmd_vel_callback, 10)
         # This service is retained only to park the models in static-only
         # scenarios. It is never used while the obstacles are moving.
         self.client = self.create_client(
@@ -207,6 +219,15 @@ class DynamicObstacleMover(Node):
         if abs(message.linear.x) + abs(message.linear.y) + abs(message.angular.z) > 1e-3:
             self.crossing_started = True
 
+    def test_state_callback(self, message):
+        """Accept only a harness epoch; no robot command or motion is consulted."""
+        if ";T0=" not in message.data:
+            return
+        try:
+            self.test_epoch_ns = int(message.data.rsplit(";T0=", 1)[1])
+        except ValueError:
+            self.get_logger().warn("Ignoring malformed causality epoch.")
+
     def publish_actual_positions(self):
         """Publish Gazebo's current model poses, not the controller estimate."""
         if len(self.actual_poses) != len(self.obstacles):
@@ -312,7 +333,12 @@ class DynamicObstacleMover(Node):
                     return
                 self.crossing_pose_confirmed = True
             if not self.crossing_started:
-                return
+                if self.test_sim_time_trigger and self.test_epoch_ns is not None:
+                    self.crossing_started = (
+                        self.get_clock().now().nanoseconds >= self.test_epoch_ns + 4_000_000_000)
+                if not self.crossing_started:
+                    self.send_velocity(self.obstacles[0], 0.0, 0.0)
+                    return
             obstacle = self.obstacles[0]
             velocity_x = 0.15 if obstacle["position"][0] < 3.45 else -0.15
             if obstacle["position"][0] <= -3.45:
