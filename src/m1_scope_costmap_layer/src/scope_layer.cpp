@@ -181,6 +181,7 @@ void ScopeLayer::onInitialize()
   declareParameter("uncertainty_gain", rclcpp::ParameterValue(1.0));
   declareParameter("uncertainty_encoding_scale", rclcpp::ParameterValue(0.5));
   declareParameter("medium_cost", rclcpp::ParameterValue(200));
+  declareParameter("temporal_prediction_hard_obstacle", rclcpp::ParameterValue(true));
   declareParameter("stale_timeout", rclcpp::ParameterValue(0.5));
 
   Config initial;
@@ -193,6 +194,8 @@ void ScopeLayer::onInitialize()
   node->get_parameter(
     getFullName("uncertainty_encoding_scale"), initial.uncertainty_encoding_scale);
   node->get_parameter(getFullName("medium_cost"), initial.medium_cost);
+  node->get_parameter(
+    getFullName("temporal_prediction_hard_obstacle"), initial.temporal_prediction_hard_obstacle);
   node->get_parameter(getFullName("stale_timeout"), initial.stale_timeout);
   std::string reason;
   if (!validConfig(initial, reason)) {
@@ -269,6 +272,8 @@ rcl_interfaces::msg::SetParametersResult ScopeLayer::onParametersChanged(
       next.uncertainty_encoding_scale = parameter.as_double();
     } else if (name == getFullName("medium_cost")) {
       next.medium_cost = static_cast<int>(parameter.as_int());
+    } else if (name == getFullName("temporal_prediction_hard_obstacle")) {
+      next.temporal_prediction_hard_obstacle = parameter.as_bool();
     } else if (name == getFullName("stale_timeout")) {
       next.stale_timeout = parameter.as_double();
     }
@@ -701,8 +706,12 @@ void ScopeLayer::updateCosts(
       {
         continue;
       }
-      const unsigned char cost = risk >= config.lethal_threshold ?
-        nav2_costmap_2d::LETHAL_OBSTACLE : static_cast<unsigned char>(config.medium_cost);
+      // A t+0.2 s forecast cannot safely be treated as a timeless hard wall
+      // throughout the 1.943 s MPPI rollout.  In temporal-soft mode it still
+      // raises local MPPI cost, while scan-observed obstacles remain lethal.
+      const unsigned char cost = risk >= config.lethal_threshold &&
+        config.temporal_prediction_hard_obstacle ? nav2_costmap_2d::LETHAL_OBSTACLE :
+        static_cast<unsigned char>(config.medium_cost);
 
       const double cropped_min_x = std::max(polygon_min_x, update_min_x);
       const double cropped_min_y = std::max(polygon_min_y, update_min_y);

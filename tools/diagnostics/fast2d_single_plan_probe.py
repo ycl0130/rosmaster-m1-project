@@ -13,6 +13,7 @@ from geometry_msgs.msg import PoseArray, PoseStamped, Twist, PoseWithCovarianceS
 from lifecycle_msgs.srv import GetState
 from nav2_msgs.action import ComputePathToPose, FollowPath, NavigateToPose
 from nav2_msgs.srv import GetCostmap
+from nav2_msgs.msg import Costmap
 from nav_msgs.msg import Odometry, Path as NavPath
 from nav_msgs.msg import OccupancyGrid
 from rclpy.action import ActionClient
@@ -46,6 +47,13 @@ class Probe(Node):
         self.scope = {"prediction_messages": 0, "uncertainty_messages": 0,
                       "prediction_nonempty": 0, "uncertainty_nonempty": 0,
                       "diagnostics": []}
+        self.restricted_mppi_trace = []
+        self.layer_snapshots = {}
+        self.first_no_feasible_layer_snapshots = None
+        self.first_full_collision_layer_snapshots = None
+        self.active_path = []
+        self.tracking_start_wall_time = None
+        self.tracking_end_wall_time = None
         self.cmd = {topic: {"samples": 0, "nonzero_samples": 0, "max_abs_linear_x": 0.0,
                              "max_abs_linear_y": 0.0, "max_abs_angular_z": 0.0}
                     for topic in ["/cmd_vel_nav", "/cmd_vel_smoothed", "/m1/cmd_vel_raw", "/cmd_vel"]}
@@ -55,6 +63,11 @@ class Probe(Node):
         self.create_subscription(OccupancyGrid, "/scope/prediction", self.on_scope_prediction, 10)
         self.create_subscription(OccupancyGrid, "/scope/uncertainty", self.on_scope_uncertainty, 10)
         self.create_subscription(DiagnosticArray, "/scope/diagnostics", self.on_scope_diagnostics, 10)
+        self.create_subscription(DiagnosticArray, "/local_fast2d/diagnostics", self.on_local_diagnostics, 50)
+        for name in ("after_obstacle", "after_scope", "after_inflation"):
+            self.create_subscription(
+                Costmap, f"/local_costmap/debug/{name}",
+                lambda msg, n=name: self.on_layer_snapshot(n, msg), 5)
         # scan_relay intentionally publishes sensor-data QoS (best effort).
         # A default reliable probe subscription is incompatible and silently
         # receives no beams, producing a false readiness failure.
@@ -112,6 +125,37 @@ class Probe(Node):
             level = status.level[0] if isinstance(status.level, bytes) else status.level
             self.scope["diagnostics"].append({"level": int(level), "message": str(status.message),
                                               "values": values})
+
+    def on_local_diagnostics(self, msg):
+        for status in msg.status:
+            if status.name != "restricted_mppi":
+                continue
+            values = {str(item.key): str(item.value) for item in status.values}
+            self.restricted_mppi_trace.append({"wall_time_s": time.monotonic(),
+                                               "status": str(status.message), "values": values})
+            if (status.message == "NO_FEASIBLE_CONTROL" and
+                    self.first_no_feasible_layer_snapshots is None):
+                self.first_no_feasible_layer_snapshots = {
+                    "captured_wall_time_s": time.monotonic(),
+                    "snapshots": dict(self.layer_snapshots)}
+            if (values.get("collision_full_mask") == "1" and
+                    self.first_full_collision_layer_snapshots is None):
+                self.first_full_collision_layer_snapshots = {
+                    "captured_wall_time_s": time.monotonic(),
+                    "collision_full_mask_stamp_ns": values.get("collision_full_mask_stamp_ns"),
+                    "snapshots": dict(self.layer_snapshots)}
+
+    def on_layer_snapshot(self, name, msg):
+        self.layer_snapshots[name] = {
+            "stamp_ns": msg.header.stamp.sec * 1_000_000_000 + msg.header.stamp.nanosec,
+            "frame": msg.header.frame_id,
+            "resolution": msg.metadata.resolution,
+            "width": msg.metadata.size_x,
+            "height": msg.metadata.size_y,
+            "origin_x": msg.metadata.origin.position.x,
+            "origin_y": msg.metadata.origin.position.y,
+            "data": list(msg.data),
+        }
 
     def on_scan(self, msg):
         self.scan = msg
@@ -297,7 +341,10 @@ class Probe(Node):
         report.update({"final_map_pose": final, "final_amcl": self.amcl, "final_odom": self.odom,
                        "cmd_vel_stats": self.cmd, "clock_backwards": self.clock_backwards,
                        "replan_snapshots": self.plan_snapshots,
-                       "scope_evaluation": self.scope})
+                       "scope_evaluation": self.scope,
+                       "restricted_mppi_trace": self.restricted_mppi_trace,
+                       "first_no_feasible_layer_snapshots": self.first_no_feasible_layer_snapshots,
+                       "first_full_collision_layer_snapshots": self.first_full_collision_layer_snapshots})
         if self.dynamic_samples:
             report["dynamic_truth_evaluation"] = {
                 "samples": self.dynamic_samples,
@@ -305,6 +352,20 @@ class Probe(Node):
         if final:
             report["final_position_error"] = distance(final, (self.args.x, self.args.y))
             report["final_yaw_error"] = abs(math.atan2(math.sin(final[2] - self.args.yaw), math.cos(final[2] - self.args.yaw)))
+        if self.active_path and self.tracking_start_wall_time is not None:
+            samples = [item for item in self.odom_trace
+                       if item[0] >= self.tracking_start_wall_time and
+                       (self.tracking_end_wall_time is None or item[0] <= self.tracking_end_wall_time)]
+            if samples:
+                # This is a measurement-only nearest-path deviation; it never
+                # feeds Nav2, MPPI, the tube, or any safety decision.
+                errors = [min(math.hypot(x - point[0], y - point[1])
+                              for point in self.active_path) for _, x, y, _ in samples]
+                report["tracking_quality"] = {
+                    "sample_count": len(errors),
+                    "average_path_deviation_m": sum(errors) / len(errors),
+                    "maximum_path_deviation_m": max(errors),
+                }
 
     def run(self):
         report = {"goal": [self.args.x, self.args.y, self.args.yaw], "action": self.args.action}
@@ -328,15 +389,18 @@ class Probe(Node):
             if response is not None and result["status"] == "SUCCEEDED":
                 path = response.path
                 points = [{"x": p.pose.position.x, "y": p.pose.position.y, "yaw": yaw(p.pose.orientation)} for p in path.poses]
+                self.active_path = [(point["x"], point["y"]) for point in points]
                 length = sum(distance((points[i]["x"], points[i]["y"]), (points[i - 1]["x"], points[i - 1]["y"])) for i in range(1, len(points)))
                 report["compute_path"].update({"planning_time_s": response.planning_time.sec + response.planning_time.nanosec * 1e-9,
                                                 "path_points": len(points), "path_length": length})
                 Path(self.args.path_output).write_text(json.dumps({"header_frame": path.header.frame_id, "poses": points}, indent=2))
                 follow_goal = FollowPath.Goal()
                 follow_goal.path, follow_goal.controller_id, follow_goal.goal_checker_id = path, "FollowPath", "general_goal_checker"
+                self.tracking_start_wall_time = time.monotonic()
                 report["follow_path"], _ = self.send_action(
                     self.follow, follow_goal, self.args.timeout,
                     lambda msg: self.feedback.append({"distance_to_goal": msg.feedback.distance_to_goal, "speed": msg.feedback.speed}))
+                self.tracking_end_wall_time = time.monotonic()
             report["follow_path_feedback"] = self.feedback
         self.final_metrics(report)
         return report

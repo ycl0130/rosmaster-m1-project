@@ -90,6 +90,8 @@ public:
 
   bool valid() const {return valid_;}
   double duration() const {return duration_sec_;}
+  double spatialLength() const;
+  double nominalDt() const;
   const RestrictedTimedReferenceMetadata & metadata() const {return metadata_;}
   const RestrictedTimedReferenceConfig & config() const {return config_;}
 

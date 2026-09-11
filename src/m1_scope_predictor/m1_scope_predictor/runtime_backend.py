@@ -86,6 +86,7 @@ class ScopeRuntimeBackend:
         self.model.eval()
 
     def infer_sequence(self, input_ogm, horizon_steps=5, num_samples=4):
+        preprocess_started = time.perf_counter()
         input_ogm = validate_model_input(input_ogm)
         if int(horizon_steps) < 1 or int(num_samples) < 1:
             raise ValueError("horizon_steps and num_samples must be positive")
@@ -97,6 +98,7 @@ class ScopeRuntimeBackend:
         inputs = inputs.repeat(int(num_samples), 1, 1, 1, 1)
         if self.device.type == "cuda":
             torch.cuda.synchronize(self.device)
+        self.last_preprocess_seconds = time.perf_counter() - preprocess_started
         started = time.perf_counter()
         predictions = []
         with torch.inference_mode():
@@ -106,11 +108,15 @@ class ScopeRuntimeBackend:
                 inputs = torch.cat((inputs[:, 1:], prediction.unsqueeze(1)), dim=1)
         if self.device.type == "cuda":
             torch.cuda.synchronize(self.device)
-        latency = time.perf_counter() - started
+        self.last_inference_seconds = time.perf_counter() - started
+        postprocess_started = time.perf_counter()
         samples = torch.stack(predictions, dim=0).detach().cpu().numpy().astype(np.float32)
         mean, standard_deviation = aggregate_sequence_samples(samples)
         memory = (int(torch.cuda.memory_allocated(self.device))
                   if self.device.type == "cuda" else 0)
+        self.last_postprocess_seconds = time.perf_counter() - postprocess_started
+        latency = (self.last_preprocess_seconds + self.last_inference_seconds +
+                   self.last_postprocess_seconds)
         return mean, standard_deviation, latency, memory
 
     def infer(self, input_ogm, horizon_steps=5, num_samples=4):

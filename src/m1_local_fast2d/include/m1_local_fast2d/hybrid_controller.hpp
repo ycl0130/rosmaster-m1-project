@@ -21,6 +21,7 @@
 #include "m1_local_fast2d/msg/selection_diagnostic_array.hpp"
 #include "m1_local_fast2d/candidate_selector.hpp"
 #include "m1_local_fast2d/restricted_mppi_reference.hpp"
+#include "m1_local_fast2d/timed_reference_retimer.hpp"
 #include "m1_scope_msgs/msg/scope_prediction_sequence.hpp"
 #include "m1_scope_risk/risk_field_snapshot.hpp"
 #include "rclcpp/rclcpp.hpp"
@@ -61,7 +62,8 @@ private:
     const std::string & cycle_class);
   void publishAcceptedDiagnostic(
     const Guide & guide, const std::shared_ptr<const RestrictedTimedReference> & reference,
-    bool switched, uint64_t previous_planning_result_id);
+    bool switched, uint64_t previous_planning_result_id,
+    const TimedReferenceRetimingDiagnostics & retiming);
   void publishRestrictedDiagnostic(const RestrictedMPPIDiagnostics & diagnostics);
   struct LatencyStats {
     std::size_t count{0};
@@ -92,7 +94,7 @@ private:
   RestrictedMPPIConfig restricted_mppi_config_;
   CandidateSelectorConfig selector_config_;
   int max_planning_time_ms_{80};
-  bool allow_unknown_{true}, active_{false}, stop_worker_{false};
+  bool allow_unknown_{true}, active_{false}, mppi_active_{false}, stop_worker_{false};
   // Test-only, default-off switch used to verify the production fallback
   // branch without changing any planner or safety behavior.
   bool test_force_fallback_{false};

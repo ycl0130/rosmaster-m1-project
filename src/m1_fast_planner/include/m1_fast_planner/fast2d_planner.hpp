@@ -6,6 +6,7 @@
 #include <string>
 
 #include "nav2_core/global_planner.hpp"
+#include "diagnostic_msgs/msg/diagnostic_array.hpp"
 #include "nav_msgs/msg/odometry.hpp"
 
 #include "m1_fast_planner/kinodynamic_astar.hpp"
@@ -48,6 +49,7 @@ private:
   std::string odom_topic_{"/odom"};
   double odom_timeout_{0.5};
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_subscription_;
+  rclcpp::Publisher<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr diagnostics_publisher_;
   nav_msgs::msg::Odometry::SharedPtr latest_odom_;
   rclcpp::Time latest_odom_received_{0, 0, RCL_ROS_TIME};
   std::mutex odom_mutex_;

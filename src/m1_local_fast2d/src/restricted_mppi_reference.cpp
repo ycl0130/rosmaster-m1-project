@@ -171,6 +171,21 @@ std::vector<ReferenceState> RestrictedTimedReference::sampleHorizon(
   return output;
 }
 
+double RestrictedTimedReference::spatialLength() const
+{
+  double length = 0.0;
+  for (std::size_t index = 1; index < samples_.size(); ++index) {
+    length += std::hypot(samples_[index].x - samples_[index - 1].x,
+      samples_[index].y - samples_[index - 1].y);
+  }
+  return length;
+}
+
+double RestrictedTimedReference::nominalDt() const
+{
+  return samples_.size() > 1 ? samples_[1].time - samples_[0].time : 0.0;
+}
+
 RestrictedTimedReferenceDiagnostics RestrictedTimedReference::diagnostics(
   int64_t now_stamp_ns, double horizon_duration_sec,
   std::size_t horizon_sample_count, bool switched,

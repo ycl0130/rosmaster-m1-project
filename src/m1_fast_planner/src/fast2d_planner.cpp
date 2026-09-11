@@ -3,9 +3,11 @@
 #include <chrono>
 #include <cmath>
 #include <exception>
+#include <sstream>
 #include <utility>
 
 #include "nav2_core/exceptions.hpp"
+#include "nav2_costmap_2d/cost_values.hpp"
 #include "pluginlib/class_list_macros.hpp"
 #include "tf2/utils.h"
 #include "tf2_geometry_msgs/tf2_geometry_msgs.hpp"
@@ -125,6 +127,8 @@ void Fast2DPlanner::configure(
       latest_odom_ = std::move(message);
       latest_odom_received_ = node->now();
     });
+  diagnostics_publisher_ = node->create_publisher<diagnostic_msgs::msg::DiagnosticArray>(
+    "/m1_fast_planner/diagnostics", rclcpp::QoS(10));
   RCLCPP_INFO(
     logger_, "Configured Fast2DPlanner kinodynamic A*: resolution=%.3f v=(%.2f,%.2f) a=(%.2f,%.2f)",
     path_resolution_, search_config_.max_velocity_x, search_config_.max_velocity_y,
@@ -138,6 +142,7 @@ void Fast2DPlanner::cleanup()
   tf_.reset();
   node_.reset();
   odom_subscription_.reset();
+  diagnostics_publisher_.reset();
   std::lock_guard<std::mutex> lock(odom_mutex_);
   latest_odom_.reset();
   active_ = false;
@@ -238,6 +243,60 @@ nav_msgs::msg::Path Fast2DPlanner::createPlan(
     path.poses.push_back(pose);
   }
   path.poses.back().pose.orientation = normalizedQuaternion(goal.pose.orientation, previous_yaw);
+  // Diagnostic only: calculate the centre-path clearance to every lethal
+  // global-costmap cell.  It does not enter A*, collision checking, or costs.
+  std::vector<std::pair<double, double>> lethal_centres;
+  for (unsigned int my = 0; my < costmap_->getSizeInCellsY(); ++my) {
+    for (unsigned int mx = 0; mx < costmap_->getSizeInCellsX(); ++mx) {
+      if (costmap_->getCost(mx, my) >= nav2_costmap_2d::LETHAL_OBSTACLE) {
+        lethal_centres.emplace_back(
+          costmap_->getOriginX() + (static_cast<double>(mx) + 0.5) * costmap_->getResolution(),
+          costmap_->getOriginY() + (static_cast<double>(my) + 0.5) * costmap_->getResolution());
+      }
+    }
+  }
+  std::vector<double> waypoint_clearances;
+  waypoint_clearances.reserve(path.poses.size());
+  double minimum_clearance = std::numeric_limits<double>::infinity();
+  double clearance_sum = 0.0;
+  for (const auto & pose : path.poses) {
+    double clearance = std::numeric_limits<double>::infinity();
+    for (const auto & obstacle : lethal_centres) {
+      clearance = std::min(clearance, std::hypot(
+        pose.pose.position.x - obstacle.first, pose.pose.position.y - obstacle.second));
+    }
+    waypoint_clearances.push_back(clearance);
+    minimum_clearance = std::min(minimum_clearance, clearance);
+    clearance_sum += clearance;
+  }
+  if (diagnostics_publisher_) {
+    diagnostic_msgs::msg::DiagnosticStatus status;
+    status.name = "fast2d_path_clearance";
+    status.hardware_id = "m1";
+    status.level = diagnostic_msgs::msg::DiagnosticStatus::OK;
+    status.message = "diagnostic-only centre-path clearance to global lethal cells";
+    const auto add = [&status](const char * key, const std::string & value) {
+        diagnostic_msgs::msg::KeyValue item; item.key = key; item.value = value; status.values.push_back(item);
+      };
+    add("frame", path.header.frame_id);
+    add("path_stamp_ns", std::to_string(rclcpp::Time(path.header.stamp).nanoseconds()));
+    add("waypoint_count", std::to_string(path.poses.size()));
+    add("lethal_cell_count", std::to_string(lethal_centres.size()));
+    add("minimum_clearance_m", std::to_string(minimum_clearance));
+    add("average_clearance_m", std::to_string(
+      waypoint_clearances.empty() ? minimum_clearance : clearance_sum / waypoint_clearances.size()));
+    std::ostringstream per_waypoint;
+    per_waypoint << '[';
+    for (std::size_t i = 0; i < waypoint_clearances.size(); ++i) {
+      if (i) {per_waypoint << ',';}
+      per_waypoint << waypoint_clearances[i];
+    }
+    per_waypoint << ']';
+    add("waypoint_clearance_m_json", per_waypoint.str());
+    diagnostic_msgs::msg::DiagnosticArray array;
+    array.header = path.header; array.status.push_back(std::move(status));
+    diagnostics_publisher_->publish(array);
+  }
   const auto planning_end = std::chrono::steady_clock::now();
   double plan_length = 0.0;
   for (std::size_t index = 1; index < path.poses.size(); ++index) {

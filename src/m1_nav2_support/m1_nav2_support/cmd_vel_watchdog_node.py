@@ -107,7 +107,11 @@ class M1CmdWatchdog(Node):
             self.output_is_stale = stale
 
         if became_stale:
-            self.get_logger().warn("Command timeout; forcing zero velocity.")
+            age_s = (now_ns - self.state.last_received_ns) / 1e9 if self.state.has_received_command else float("inf")
+            self.get_logger().warn(
+                "Command timeout; forcing zero velocity: raw_input=/m1/cmd_vel_raw "
+                "age=%.3fs timeout=%.3fs received=%s.",
+                age_s, self.state.timeout_ns / 1e9, self.state.has_received_command)
         # This is intentionally published every timer cycle in both modes.
         # In stale mode it continually overwrites any latched driver command.
         self.output_publisher.publish(command)

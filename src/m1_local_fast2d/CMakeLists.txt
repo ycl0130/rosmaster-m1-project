@@ -29,7 +29,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/SelectionDiagnosticArray.msg"
   DEPENDENCIES builtin_interfaces std_msgs)
 rosidl_get_typesupport_target(cpp_typesupport_target ${PROJECT_NAME} "rosidl_typesupport_cpp")
-add_library(local_fast2d_plugin SHARED src/hybrid_controller.cpp src/local_fast2d_core.cpp src/candidate_risk_scorer.cpp src/candidate_selector.cpp src/restricted_mppi_reference.cpp src/restricted_mppi_phase_tracker.cpp src/restricted_mppi_policy.cpp src/restricted_mppi_adapter.cpp)
+add_library(local_fast2d_plugin SHARED src/hybrid_controller.cpp src/local_fast2d_core.cpp src/candidate_risk_scorer.cpp src/candidate_selector.cpp src/timed_reference_retimer.cpp src/restricted_mppi_reference.cpp src/restricted_mppi_phase_tracker.cpp src/restricted_mppi_policy.cpp src/restricted_mppi_adapter.cpp)
 # rosidl reserves the package-name target; retain the historical installed
 # libm1_local_fast2d.so required by the plugin XML.
 set_target_properties(local_fast2d_plugin PROPERTIES OUTPUT_NAME ${PROJECT_NAME})
@@ -72,6 +72,10 @@ if(BUILD_TESTING)
   ament_add_gtest(test_restricted_mppi_phase_tracker test/test_restricted_mppi_phase_tracker.cpp)
   if(TARGET test_restricted_mppi_phase_tracker)
     target_link_libraries(test_restricted_mppi_phase_tracker local_fast2d_plugin)
+  endif()
+  ament_add_gtest(test_timed_reference_retimer test/test_timed_reference_retimer.cpp)
+  if(TARGET test_timed_reference_retimer)
+    target_link_libraries(test_timed_reference_retimer local_fast2d_plugin)
   endif()
 endif()
 ament_export_dependencies(rosidl_default_runtime)

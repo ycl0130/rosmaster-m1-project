@@ -69,6 +69,7 @@ private:
     double uncertainty_gain{1.0};
     double uncertainty_encoding_scale{0.5};
     int medium_cost{200};
+    bool temporal_prediction_hard_obstacle{true};
     double stale_timeout{0.5};
   };
 

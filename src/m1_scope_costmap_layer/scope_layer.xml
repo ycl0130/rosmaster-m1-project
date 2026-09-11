@@ -7,4 +7,10 @@
       Max-combining Nav2 layer for matched SCOPE prediction and uncertainty grids.
     </description>
   </class>
+  <class
+    name="m1_scope_costmap_layer::MasterSnapshotLayer"
+    type="m1_scope_costmap_layer::MasterSnapshotLayer"
+    base_class_type="nav2_costmap_2d::Layer">
+    <description>Read-only composed-master snapshot at a configured layer boundary.</description>
+  </class>
 </library>

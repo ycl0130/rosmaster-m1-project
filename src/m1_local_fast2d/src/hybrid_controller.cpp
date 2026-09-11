@@ -1,8 +1,14 @@
 #include "m1_local_fast2d/hybrid_controller.hpp"
 
 #include <algorithm>
+#include <array>
+#include <csignal>
 #include <chrono>
 #include <cmath>
+#include <execinfo.h>
+#include <cstdio>
+#include <ucontext.h>
+#include <unistd.h>
 #include <limits>
 #include <utility>
 #include <vector>
@@ -10,6 +16,7 @@
 #include "m1_local_fast2d/local_fast2d_core.hpp"
 #include "m1_local_fast2d/candidate_risk_scorer.hpp"
 #include "m1_local_fast2d/candidate_selector.hpp"
+#include "m1_local_fast2d/timed_reference_retimer.hpp"
 #include "diagnostic_msgs/msg/diagnostic_status.hpp"
 #include "nav2_costmap_2d/cost_values.hpp"
 #include "pluginlib/class_list_macros.hpp"
@@ -20,6 +27,70 @@ namespace m1_local_fast2d
 {
 namespace
 {
+std::once_flag crash_backtrace_once;
+
+void writeCrashBacktrace(int signal, siginfo_t * info, void * context)
+{
+  constexpr char header[] = "m1_local_fast2d SIGSEGV backtrace:\n";
+  ::write(STDERR_FILENO, header, sizeof(header) - 1);
+  const auto * ucontext = static_cast<ucontext_t *>(context);
+  char registers[512];
+  const auto bytes = std::snprintf(
+    registers, sizeof(registers),
+    "signal=%d fault=%p rip=%#llx rdi=%#llx rsi=%#llx rdx=%#llx rcx=%#llx r8=%#llx\n",
+    signal, info ? info->si_addr : nullptr,
+    static_cast<unsigned long long>(ucontext->uc_mcontext.gregs[REG_RIP]),
+    static_cast<unsigned long long>(ucontext->uc_mcontext.gregs[REG_RDI]),
+    static_cast<unsigned long long>(ucontext->uc_mcontext.gregs[REG_RSI]),
+    static_cast<unsigned long long>(ucontext->uc_mcontext.gregs[REG_RDX]),
+    static_cast<unsigned long long>(ucontext->uc_mcontext.gregs[REG_RCX]),
+    static_cast<unsigned long long>(ucontext->uc_mcontext.gregs[REG_R8]));
+  if (bytes > 0) {
+    ::write(STDERR_FILENO, registers, static_cast<std::size_t>(bytes));
+  }
+  std::array<void *, 64> frames{};
+  const int count = ::backtrace(frames.data(), static_cast<int>(frames.size()));
+  ::backtrace_symbols_fd(frames.data(), count, STDERR_FILENO);
+  struct sigaction default_action {};
+  default_action.sa_handler = SIG_DFL;
+  sigemptyset(&default_action.sa_mask);
+  sigaction(signal, &default_action, nullptr);
+  std::raise(signal);
+}
+
+void installCrashBacktraceHandler()
+{
+  struct sigaction action {};
+  action.sa_sigaction = writeCrashBacktrace;
+  sigemptyset(&action.sa_mask);
+  action.sa_flags = SA_SIGINFO;
+  sigaction(SIGSEGV, &action, nullptr);
+}
+
+// Conditions only the controller-owned timed-reference copy. Positions and
+// timestamps are deliberately untouched: the planner's geometry/horizon stay
+// authoritative, while its initial state is made continuous with the state
+// from which MPPI will propagate.
+m1_local_fast2d::msg::TimedTrajectory conditionTimedReference(
+  m1_local_fast2d::msg::TimedTrajectory trajectory, double robot_yaw,
+  const geometry_msgs::msg::Twist & robot_twist, TimedReferenceRetimingDiagnostics * retiming)
+{
+  (void)robot_yaw;
+  (void)robot_twist;
+  TimedReferenceRetimingDiagnostics result;
+  auto output = retimeTimedReference(trajectory, {}, &result);
+  if (retiming) {*retiming = result;}
+  RCLCPP_INFO(rclcpp::get_logger("TimedReferenceRetimer"),
+    "retimed points=%zu scale=%.6f duration=%.6f->%.6f v=(%.6f,%.6f,%.6f)->(%.6f,%.6f,%.6f) a=(%.6f,%.6f,%.6f)->(%.6f,%.6f,%.6f) geometry_error=%.9f terminal_split=%d terminal_distance=%.6f terminal_speed=%.6f terminal_turn_s=%.6f terminal_scale=%.6f",
+    output.points.size(), result.time_scale, result.before_duration, result.after_duration,
+    result.before_max_vx, result.before_max_vy, result.before_max_wz,
+    result.after_max_vx, result.after_max_vy, result.after_max_wz,
+    result.before_max_ax, result.before_max_ay, result.before_max_awz,
+    result.after_max_ax, result.after_max_ay, result.after_max_awz, result.geometry_error,
+    result.terminal_heading_split ? 1 : 0, result.terminal_approach_distance,
+    result.terminal_approach_speed, result.terminal_rotation_duration, result.terminal_time_scale);
+  return output;
+}
 }  // namespace
 
 HybridController::~HybridController() {cleanup();}
@@ -29,6 +100,7 @@ void HybridController::configure(const rclcpp_lifecycle::LifecycleNode::WeakPtr 
   std::shared_ptr<nav2_costmap_2d::Costmap2DROS> costmap_ros)
 {
   node_ = parent; name_ = std::move(name); tf_ = std::move(tf); costmap_ros_ = std::move(costmap_ros);
+  std::call_once(crash_backtrace_once, installCrashBacktraceHandler);
   auto node = node_.lock();
   if (!node || !costmap_ros_) {throw std::runtime_error("HybridController needs local Costmap2DROS");}
   const auto declare = [&node, this](const char * suffix, auto & value) {
@@ -109,8 +181,8 @@ void HybridController::configure(const rclcpp_lifecycle::LifecycleNode::WeakPtr 
   }
 }
 
-void HybridController::activate() {active_ = true; mppi_->activate(); stop_worker_ = false; worker_ = std::thread(&HybridController::workerLoop, this);}
-void HybridController::deactivate() {active_ = false; {std::lock_guard<std::mutex> l(mutex_); stop_worker_ = true; previous_selected_trajectory_.reset();} wake_.notify_all(); if (worker_.joinable()) {worker_.join();} if (mppi_) {mppi_->deactivate();}}
+void HybridController::activate() {mppi_->activate(); mppi_active_ = true; active_ = true; stop_worker_ = false; worker_ = std::thread(&HybridController::workerLoop, this);}
+void HybridController::deactivate() {active_ = false; {std::lock_guard<std::mutex> l(mutex_); stop_worker_ = true; previous_selected_trajectory_.reset();} wake_.notify_all(); if (worker_.joinable()) {worker_.join();} if (mppi_ && mppi_active_) {mppi_->deactivate(); mppi_active_ = false;}}
 void HybridController::cleanup() {deactivate(); restricted_mppi_adapter_.reset(); if (mppi_) {mppi_->cleanup(); mppi_.reset();} path_pub_.reset(); goal_pub_.reset(); accepted_pub_.reset(); accepted_costmap_pub_.reset(); accepted_timed_trajectory_pub_.reset(); candidates_pub_.reset(); risk_scores_pub_.reset(); selected_trajectory_pub_.reset(); selection_diagnostics_pub_.reset(); scope_sequence_sub_.reset(); diagnostics_pub_.reset(); {std::lock_guard<std::mutex> lock(mutex_); latest_reference_.reset();} costmap_ros_.reset(); tf_.reset(); node_.reset();}
 
 void HybridController::setPlan(const nav_msgs::msg::Path & path)
@@ -127,6 +199,14 @@ geometry_msgs::msg::TwistStamped HybridController::computeVelocityCommands(
   const geometry_msgs::msg::PoseStamped & pose, const geometry_msgs::msg::Twist & velocity,
   nav2_core::GoalChecker * goal_checker)
 {
+  RCLCPP_INFO_ONCE(rclcpp::get_logger("HybridController"),
+    "Restricted MPPI controller callback begin (first invocation)");
+  // This boundary is the actual Nav2 controller callback.  The adapter also
+  // records its own restricted-MPPI duration; keep the two measurements
+  // separate so controller_total_ms includes only the small HybridController
+  // handoff around the frozen MPPI computation, without timing diagnostics
+  // publication itself.
+  const auto controller_cycle_started = std::chrono::steady_clock::now();
   Guide guide; nav_msgs::msg::Path original; bool use_guide = false;
   auto node = node_.lock();
   // This default-off diagnostic hook is read at the controller boundary so a
@@ -153,7 +233,20 @@ geometry_msgs::msg::TwistStamped HybridController::computeVelocityCommands(
     metadata.frame_id = guide.timed_trajectory.header.frame_id;
     metadata.source_stamp_ns = rclcpp::Time(guide.timed_trajectory.header.stamp).nanoseconds();
     metadata.activation_stamp_ns = node_now_ns;
-    reference = std::make_shared<const RestrictedTimedReference>(guide.timed_trajectory, metadata);
+    geometry_msgs::msg::PoseStamped reference_pose = pose;
+    if (reference_pose.header.frame_id != metadata.frame_id) {
+      try {
+        geometry_msgs::msg::PoseStamped transformed;
+        tf_->transform(reference_pose, transformed, metadata.frame_id, tf2::durationFromSec(0.2));
+        reference_pose = transformed;
+      } catch (const tf2::TransformException &) {
+        reference_pose = pose;
+      }
+    }
+    TimedReferenceRetimingDiagnostics retiming;
+    const auto conditioned = conditionTimedReference(
+      guide.timed_trajectory, tf2::getYaw(reference_pose.pose.orientation), velocity, &retiming);
+    reference = std::make_shared<const RestrictedTimedReference>(conditioned, metadata);
     {
       std::lock_guard<std::mutex> lock(mutex_);
       if (latest_reference_) {
@@ -167,7 +260,7 @@ geometry_msgs::msg::TwistStamped HybridController::computeVelocityCommands(
     if (accepted_pub_) {accepted_pub_->publish(guide.path);}
     if (accepted_costmap_pub_) {accepted_costmap_pub_->publish(guide.snapshot);}
     if (accepted_timed_trajectory_pub_) {accepted_timed_trajectory_pub_->publish(guide.timed_trajectory);}
-    publishAcceptedDiagnostic(guide, reference, switched, previous_planning_result_id);
+    publishAcceptedDiagnostic(guide, reference, switched, previous_planning_result_id, retiming);
     std::lock_guard<std::mutex> l(mutex_); ++guide_accepted_count_; reference_source_ = "local_fast2d";
   }
   if (!use_guide && forwarded_generation_ != 0) {mppi_->setPlan(original); forwarded_generation_ = 0;}
@@ -195,6 +288,11 @@ geometry_msgs::msg::TwistStamped HybridController::computeVelocityCommands(
     auto command = restricted_mppi_adapter_->computeVelocityCommands(
       pose, velocity, goal_checker, active_reference, active_reference_generation,
       restricted_config, restricted_diagnostics);
+    RCLCPP_INFO_ONCE(rclcpp::get_logger("HybridController"),
+      "Restricted MPPI adapter returned from first invocation with status=%s",
+      restricted_diagnostics.status.c_str());
+    restricted_diagnostics.controller_total_ms = std::chrono::duration<double, std::milli>(
+      std::chrono::steady_clock::now() - controller_cycle_started).count();
     publishRestrictedDiagnostic(restricted_diagnostics);
     return command;
   }
@@ -385,7 +483,8 @@ void HybridController::planOnce(const Input & input)
 
 void HybridController::publishAcceptedDiagnostic(
   const Guide & guide, const std::shared_ptr<const RestrictedTimedReference> & reference,
-  bool switched, uint64_t previous_planning_result_id)
+  bool switched, uint64_t previous_planning_result_id,
+  const TimedReferenceRetimingDiagnostics & retiming)
 {
   auto node = node_.lock(); if (!node || !diagnostics_pub_) {return;}
   diagnostic_msgs::msg::DiagnosticStatus status;
@@ -410,6 +509,28 @@ void HybridController::publishAcceptedDiagnostic(
   add("snapshot_stamp_ns", stamp_ns);
   add("snapshot_size_x", guide.snapshot.metadata.size_x);
   add("snapshot_size_y", guide.snapshot.metadata.size_y);
+  add("retiming_valid", retiming.valid ? 1 : 0);
+  add("retiming_time_scale", retiming.time_scale);
+  add("retiming_before_duration_s", retiming.before_duration);
+  add("retiming_after_duration_s", retiming.after_duration);
+  add("retiming_before_max_vx", retiming.before_max_vx);
+  add("retiming_before_max_vy", retiming.before_max_vy);
+  add("retiming_before_max_wz", retiming.before_max_wz);
+  add("retiming_after_max_vx", retiming.after_max_vx);
+  add("retiming_after_max_vy", retiming.after_max_vy);
+  add("retiming_after_max_wz", retiming.after_max_wz);
+  add("retiming_before_max_ax", retiming.before_max_ax);
+  add("retiming_before_max_ay", retiming.before_max_ay);
+  add("retiming_before_max_awz", retiming.before_max_awz);
+  add("retiming_after_max_ax", retiming.after_max_ax);
+  add("retiming_after_max_ay", retiming.after_max_ay);
+  add("retiming_after_max_awz", retiming.after_max_awz);
+  add("retiming_geometry_error_m", retiming.geometry_error);
+  add("terminal_heading_split", retiming.terminal_heading_split ? 1 : 0);
+  add("terminal_approach_distance_m", retiming.terminal_approach_distance);
+  add("terminal_reference_speed_mps", retiming.terminal_approach_speed);
+  add("terminal_rotation_duration_s", retiming.terminal_rotation_duration);
+  add("terminal_time_scale", retiming.terminal_time_scale);
   if (reference) {
     const auto reference_diagnostics = reference->diagnostics(
       node->now().nanoseconds(), 2.0, 40, switched, previous_planning_result_id);
@@ -483,11 +604,87 @@ void HybridController::publishRestrictedDiagnostic(const RestrictedMPPIDiagnosti
   add("projected_phase_ms", diagnostics.projected_phase_s * 1000.0);
   add("tracking_phase_ms", diagnostics.tracking_phase_s * 1000.0);
   add("phase_lead_ms", diagnostics.phase_lead_s * 1000.0);
+  add("robot_x", diagnostics.robot_x);
+  add("robot_y", diagnostics.robot_y);
+  add("reference_source_stamp_ns", diagnostics.reference_source_stamp_ns);
+  add("reference_activation_stamp_ns", diagnostics.reference_activation_stamp_ns);
+  add("reference_length_m", diagnostics.reference_length_m);
+  add("reference_start_x", diagnostics.reference_start_x);
+  add("reference_start_y", diagnostics.reference_start_y);
+  add("reference_last_x", diagnostics.reference_last_x);
+  add("reference_last_y", diagnostics.reference_last_y);
+  add("initial_reference_error_m", diagnostics.initial_reference_error_m);
+  add("reference_dt_s", diagnostics.reference_dt_s);
+  add("reference0_yaw", diagnostics.reference0_yaw);
+  add("reference0_vx_world", diagnostics.reference0_vx_world);
+  add("reference0_vy_world", diagnostics.reference0_vy_world);
+  add("reference0_wz", diagnostics.reference0_wz);
+  add("robot_yaw", diagnostics.robot_yaw);
+  add("robot_vx", diagnostics.robot_vx);
+  add("robot_vy", diagnostics.robot_vy);
+  add("robot_wz", diagnostics.robot_wz);
+  add("rollout0_x", diagnostics.rollout0_x);
+  add("rollout0_y", diagnostics.rollout0_y);
+  add("rollout0_yaw", diagnostics.rollout0_yaw);
+  add("tube0_reference_x", diagnostics.tube0_reference_x);
+  add("tube0_reference_y", diagnostics.tube0_reference_y);
+  add("tube0_deviation_m", diagnostics.tube0_deviation_m);
+  addText("original_horizon_state_json", diagnostics.original_horizon_state_json);
+  addText("conditioned_horizon_state_json", diagnostics.conditioned_horizon_state_json);
+  addText("conditioning_input_check_json", diagnostics.conditioning_input_check_json);
+  add("original_max_kinematic_residual_m", diagnostics.original_max_kinematic_residual_m);
+  add("conditioned_max_kinematic_residual_m", diagnostics.conditioned_max_kinematic_residual_m);
+  add("original_max_yaw_residual_rad", diagnostics.original_max_yaw_residual_rad);
+  add("conditioned_max_yaw_residual_rad", diagnostics.conditioned_max_yaw_residual_rad);
+  addText("horizon_state_json", diagnostics.horizon_state_json);
+  addText("mppi_limits_json", diagnostics.mppi_limits_json);
+  addText("first_rollout_json", diagnostics.first_rollout_json);
+  addText("deviation_inputs_json", diagnostics.deviation_inputs_json);
   add("rollout_count", diagnostics.rollout_count);
   add("feasible_sample_count", diagnostics.feasible_sample_count);
+  add("feasible_sample_ratio", diagnostics.feasible_sample_ratio);
   add("tube_rejected_count", diagnostics.tube_rejected_count);
   add("collision_rejected_count", diagnostics.collision_rejected_count);
+  add("collision_full_mask", diagnostics.collision_full_mask ? 1 : 0);
+  add("collision_full_mask_stamp_ns", diagnostics.collision_full_mask_stamp_ns);
+  addText("collision_rollout_evidence_json", diagnostics.collision_rollout_evidence_json);
+  addText("collision_costmap_json", diagnostics.collision_costmap_json);
+  add("first_tube_breach_captured", diagnostics.first_tube_breach_captured ? 1 : 0);
+  add("first_tube_breach_batch", diagnostics.first_tube_breach_batch);
+  add("first_tube_breach_step", diagnostics.first_tube_breach_step);
+  add("first_tube_breach_deviation_m", diagnostics.first_tube_breach_deviation_m);
+  add("first_tube_breach_rollout_x", diagnostics.first_tube_breach_rollout_x);
+  add("first_tube_breach_rollout_y", diagnostics.first_tube_breach_rollout_y);
+  add("first_tube_breach_reference_x", diagnostics.first_tube_breach_reference_x);
+  add("first_tube_breach_reference_y", diagnostics.first_tube_breach_reference_y);
   add("control_bound_clamped_count", diagnostics.control_bound_clamped_count);
+  add("proposed_scalar_control_count", diagnostics.proposed_scalar_control_count);
+  add("clamped_scalar_control_count", diagnostics.clamped_scalar_control_count);
+  add("proposed_sample_step_count", diagnostics.proposed_sample_step_count);
+  add("clamped_sample_step_count", diagnostics.clamped_sample_step_count);
+  add("proposed_sample_count", diagnostics.proposed_sample_count);
+  add("clamped_sample_count", diagnostics.clamped_sample_count);
+  add("vx_clamp_count", diagnostics.vx_clamp_count);
+  add("vy_clamp_count", diagnostics.vy_clamp_count);
+  add("wz_clamp_count", diagnostics.wz_clamp_count);
+  add("lower_bound_clamp_count", diagnostics.lower_bound_clamp_count);
+  add("upper_bound_clamp_count", diagnostics.upper_bound_clamp_count);
+  add("velocity_bound_clamp_count", diagnostics.velocity_bound_clamp_count);
+  add("acceleration_bound_clamp_count", diagnostics.acceleration_bound_clamp_count);
+  add("controller_total_ms", diagnostics.controller_total_ms);
+  add("restricted_mppi_total_ms", diagnostics.restricted_mppi_total_ms);
+  add("phase_tracking_ms", diagnostics.phase_tracking_ms);
+  add("sampling_ms", diagnostics.sampling_ms);
+  add("control_bounds_ms", diagnostics.control_bounds_ms);
+  add("rollout_ms", diagnostics.rollout_ms);
+  add("tube_filter_ms", diagnostics.tube_filter_ms);
+  add("collision_filter_ms", diagnostics.collision_filter_ms);
+  add("critic_ms", diagnostics.critic_ms);
+  add("costmap_access_ms", diagnostics.costmap_access_ms);
+  add("command_finalization_ms", diagnostics.command_finalization_ms);
+  add("batch_size", diagnostics.batch_size);
+  add("time_steps", diagnostics.time_steps);
+  add("model_dt", diagnostics.model_dt);
   add("maximum_accepted_tube_deviation", diagnostics.maximum_accepted_tube_deviation);
   add("maximum_generated_tube_deviation", diagnostics.maximum_generated_tube_deviation);
   add("nominal_vx_ref", diagnostics.nominal_command.vx);

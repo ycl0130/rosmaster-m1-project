@@ -3,13 +3,14 @@ project(m1_scope_costmap_layer)
 
 find_package(ament_cmake REQUIRED)
 find_package(nav2_costmap_2d REQUIRED)
+find_package(nav2_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(pluginlib REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_lifecycle REQUIRED)
 find_package(tf2_ros REQUIRED)
 
-add_library(${PROJECT_NAME} SHARED src/scope_layer.cpp)
+add_library(${PROJECT_NAME} SHARED src/scope_layer.cpp src/master_snapshot_layer.cpp)
 target_compile_features(${PROJECT_NAME} PUBLIC cxx_std_17)
 target_compile_options(${PROJECT_NAME} PRIVATE -Wall -Wextra -Wpedantic)
 target_include_directories(${PROJECT_NAME} PUBLIC
@@ -17,6 +18,7 @@ target_include_directories(${PROJECT_NAME} PUBLIC
   $<INSTALL_INTERFACE:include>)
 ament_target_dependencies(${PROJECT_NAME}
   nav2_costmap_2d
+  nav2_msgs
   nav_msgs
   pluginlib
   rclcpp
@@ -53,6 +55,7 @@ ament_export_include_directories(include)
 ament_export_libraries(${PROJECT_NAME})
 ament_export_dependencies(
   nav2_costmap_2d
+  nav2_msgs
   nav_msgs
   pluginlib
   rclcpp

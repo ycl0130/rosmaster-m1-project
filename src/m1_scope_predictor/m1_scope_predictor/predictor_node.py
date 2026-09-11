@@ -358,6 +358,12 @@ class ScopePredictorNode(Node):
             "input_state": self.last_input_state,
             "inference_latency_ms": ("%.3f" % (result.latency_seconds * 1000.0)
                                      if result else "nan"),
+            "preprocess_latency_ms": ("%.3f" % (result.preprocess_seconds * 1000.0)
+                                        if result else "nan"),
+            "model_inference_latency_ms": ("%.3f" % (result.inference_seconds * 1000.0)
+                                              if result else "nan"),
+            "postprocess_latency_ms": ("%.3f" % (result.postprocess_seconds * 1000.0)
+                                         if result else "nan"),
             "prediction_age_ms": ("%.3f" % (
                 (self.get_clock().now().nanoseconds
                  - result.job.anchor_stamp_ns) / 1e6)

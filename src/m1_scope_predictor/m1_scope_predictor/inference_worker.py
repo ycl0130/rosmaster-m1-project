@@ -13,6 +13,9 @@ class InferenceResult:
     standard_deviations: object = None
     latency_seconds: float = 0.0
     memory_bytes: int = 0
+    preprocess_seconds: float = 0.0
+    inference_seconds: float = 0.0
+    postprocess_seconds: float = 0.0
     error: Exception = None
 
 
@@ -52,7 +55,10 @@ class InferenceWorker:
                 result = InferenceResult(
                     job=job, means=means,
                     standard_deviations=standard_deviations,
-                    latency_seconds=float(latency), memory_bytes=int(memory))
+                    latency_seconds=float(latency), memory_bytes=int(memory),
+                    preprocess_seconds=float(getattr(self.backend, "last_preprocess_seconds", 0.0)),
+                    inference_seconds=float(getattr(self.backend, "last_inference_seconds", latency)),
+                    postprocess_seconds=float(getattr(self.backend, "last_postprocess_seconds", 0.0)))
             except Exception as error:  # keep failures out of the ROS executor
                 result = InferenceResult(job=job, error=error)
             self.output.put(result)

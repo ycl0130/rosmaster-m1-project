@@ -13,6 +13,11 @@ OUT = Path("/tmp/fast2d_final_autofix")
 DOMAIN_BASE = 71
 
 
+def _interrupt(signum, _frame):
+    """Turn TERM/INT into a Python unwind so `one()` always runs its finally."""
+    raise KeyboardInterrupt("runner interrupted by signal %d" % signum)
+
+
 def write_json(path, value):
     path.write_text(json.dumps(value, indent=2, sort_keys=True))
 
@@ -64,7 +69,8 @@ def environment(index, name):
 
 def one(mode, name, index, dynamic=False, seed=None, action="fixed", retries=3,
         x=2.5, y=1.5, yaw=0.0, motion_mode="continuous", scope_enabled=False,
-        scope_model_path=None, local_fast2d_mode="off"):
+        scope_model_path=None, local_fast2d_mode="off", restricted_mppi_enabled=False,
+        params_file=None):
     case_dir = OUT / name
     case_dir.mkdir(parents=True, exist_ok=True)
     for attempt in range(retries):
@@ -82,9 +88,25 @@ def one(mode, name, index, dynamic=False, seed=None, action="fixed", retries=3,
         run_home = run_dir / "home"
         run_home.mkdir(exist_ok=True)
         env["HOME"] = str(run_home)
+        # Scope's installed ROS console wrapper normally has the system
+        # Python shebang.  The launch file deliberately honors this explicit
+        # interpreter prefix, so verify it before burning a Gazebo attempt.
+        if scope_enabled:
+            scope_python = env.get("M1_SCOPE_PYTHON", "python3")
+            check = subprocess.run([scope_python, "-c", "import torch, rclpy; assert torch.cuda.is_available()"],
+                                   text=True, capture_output=True)
+            if check.returncode or not scope_model_path or not Path(scope_model_path).is_file():
+                report = {"environment_status": "SCOPE_RUNTIME_INVALID",
+                          "scope_python": scope_python, "torch_check": check.stderr.strip(),
+                          "scope_model_path": scope_model_path,
+                          "model_exists": bool(scope_model_path and Path(scope_model_path).is_file())}
+                write_json(run_dir / "result.json", report)
+                write_json(case_dir / "result.json", report)
+                return report
         metadata = {"name": name, "attempt": attempt + 1, "planner_mode": mode,
                     "dynamic_obstacles": dynamic, "dynamic_seed": seed, "action": action,
                     "goal": [x, y, yaw],
+                    "restricted_mppi_enabled": restricted_mppi_enabled,
                     "ROS_DOMAIN_ID": domain, "IGN_PARTITION": partition, "GZ_PARTITION": partition,
                     "ROS_LOG_DIR": str(ros_log_dir), "HOME": str(run_home)}
         write_json(run_dir / "environment.json", metadata)
@@ -93,9 +115,12 @@ def one(mode, name, index, dynamic=False, seed=None, action="fixed", retries=3,
                   f"dynamic_obstacles:={str(dynamic).lower()}",
                   f"scope_enabled:={str(scope_enabled).lower()}",
                   f"planner_mode:={mode}", f"local_fast2d_mode:={local_fast2d_mode}",
+                  f"restricted_mppi_enabled:={str(restricted_mppi_enabled).lower()}",
                   f"dynamic_motion_mode:={motion_mode}"]
         if scope_model_path:
             launch.append(f"scope_model_path:={scope_model_path}")
+        if params_file:
+            launch.append(f"params_file:={params_file}")
         if seed is not None:
             launch.append(f"dynamic_seed:={seed}")
         launch_command = " ".join(subprocess.list2cmdline([item]) for item in launch)
@@ -167,6 +192,8 @@ def one(mode, name, index, dynamic=False, seed=None, action="fixed", retries=3,
 
 
 def main():
+    signal.signal(signal.SIGINT, _interrupt)
+    signal.signal(signal.SIGTERM, _interrupt)
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=["fast2d", "navfn"], required=True)
     parser.add_argument("--name", required=True)
@@ -181,13 +208,29 @@ def main():
     parser.add_argument("--scope-enabled", action="store_true")
     parser.add_argument("--scope-model-path")
     parser.add_argument("--local-fast2d-mode", choices=["off", "shadow", "active"], default="off")
+    parser.add_argument("--restricted-mppi-enabled", action="store_true")
+    parser.add_argument("--params-file", help="Experiment-only Nav2 parameter YAML.")
+    parser.add_argument("--out-root", help="Directory for this runner's evidence.")
     args = parser.parse_args()
-    print(json.dumps(one(args.mode, args.name, args.index, args.dynamic, args.seed, args.action,
-                         x=args.x, y=args.y, yaw=args.yaw,
-                         motion_mode=args.motion_mode,
-                         scope_enabled=args.scope_enabled,
-                         scope_model_path=args.scope_model_path,
-                         local_fast2d_mode=args.local_fast2d_mode), indent=2))
+    global OUT
+    if args.out_root:
+        OUT = Path(args.out_root).resolve()
+    try:
+        report = one(args.mode, args.name, args.index, args.dynamic, args.seed, args.action,
+                     x=args.x, y=args.y, yaw=args.yaw,
+                     motion_mode=args.motion_mode,
+                     scope_enabled=args.scope_enabled,
+                     scope_model_path=args.scope_model_path,
+                     local_fast2d_mode=args.local_fast2d_mode,
+                     restricted_mppi_enabled=args.restricted_mppi_enabled,
+                     params_file=args.params_file)
+    except KeyboardInterrupt as error:
+        print(json.dumps({"environment_status": "RUNNER_INTERRUPTED", "error": str(error)}, indent=2))
+        raise SystemExit(130)
+    print(json.dumps(report, indent=2))
+    if report.get("environment_status") in {"RUNNER_TIMEOUT", "SCOPE_RUNTIME_INVALID",
+                                             "ENVIRONMENT_INVALID", "READINESS_TIMEOUT"}:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

@@ -116,8 +116,12 @@ def test_scope_costmap_layer_is_local_only_and_precedes_inflation():
     global_costmap = costmap_parameters("global_costmap")
 
     assert local["plugins"] == [
-        "obstacle_layer", "scope_layer", "inflation_layer"
+        "obstacle_layer", "obstacle_snapshot", "scope_layer", "scope_snapshot",
+        "inflation_layer", "master_snapshot"
     ]
+    assert local["obstacle_snapshot"]["plugin"] == "m1_scope_costmap_layer::MasterSnapshotLayer"
+    assert local["scope_snapshot"]["plugin"] == "m1_scope_costmap_layer::MasterSnapshotLayer"
+    assert local["master_snapshot"]["plugin"] == "m1_scope_costmap_layer::MasterSnapshotLayer"
     assert local["inflation_layer"]["inflation_radius"] == 0.4
     assert local["scope_layer"] == {
         "plugin": "m1_scope_costmap_layer::ScopeLayer",
@@ -129,6 +133,7 @@ def test_scope_costmap_layer_is_local_only_and_precedes_inflation():
         "uncertainty_gain": 0.5,
         "uncertainty_encoding_scale": 0.5,
         "medium_cost": 200,
+        "temporal_prediction_hard_obstacle": False,
         "stale_timeout": 0.5,
     }
     assert "scope_layer" not in global_costmap["plugins"]

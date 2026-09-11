@@ -3,6 +3,7 @@ project(m1_fast_planner)
 
 find_package(ament_cmake REQUIRED)
 find_package(geometry_msgs REQUIRED)
+find_package(diagnostic_msgs REQUIRED)
 find_package(nav2_core REQUIRED)
 find_package(nav2_costmap_2d REQUIRED)
 find_package(nav_msgs REQUIRED)
@@ -23,6 +24,7 @@ target_include_directories(${PROJECT_NAME} PUBLIC
   $<INSTALL_INTERFACE:include>)
 ament_target_dependencies(${PROJECT_NAME}
   geometry_msgs
+  diagnostic_msgs
   nav2_core
   nav2_costmap_2d
   nav_msgs
@@ -66,6 +68,7 @@ ament_export_include_directories(include)
 ament_export_libraries(${PROJECT_NAME})
 ament_export_dependencies(
   geometry_msgs
+  diagnostic_msgs
   nav2_core
   nav2_costmap_2d
   nav_msgs

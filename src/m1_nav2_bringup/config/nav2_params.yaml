@@ -184,9 +184,9 @@ controller_server:
       # M1 is mecanum-drive, so MPPI samples longitudinal, lateral and
       # rotational velocity together using the omni motion model.
       motion_model: Omni
-      time_steps: 40
-      model_dt: 0.05
-      batch_size: 500
+      time_steps: 30
+      model_dt: 0.067
+      batch_size: 200
       iteration_count: 1
       vx_std: 0.3
       vy_std: 0.3
@@ -261,7 +261,9 @@ local_costmap:
       resolution: 0.05
       footprint: "[[-0.15,-0.12],[-0.15,0.12],[0.15,0.12],[0.15,-0.12]]"
       footprint_padding: 0.02
-      plugins: [obstacle_layer, scope_layer, inflation_layer]
+      # Snapshot layers are Phase 6C diagnostics only: they read and publish
+      # the master grid at each boundary but never alter bounds or costs.
+      plugins: [obstacle_layer, obstacle_snapshot, scope_layer, scope_snapshot, inflation_layer, master_snapshot]
       obstacle_layer:
         plugin: nav2_costmap_2d::ObstacleLayer
         enabled: true
@@ -287,6 +289,11 @@ local_costmap:
           # Keep the default strict: GPU scans are finite in the measured
           # bridge path, so +Inf-as-clearing is not enabled without evidence.
           inf_is_valid: false
+      obstacle_snapshot:
+        plugin: m1_scope_costmap_layer::MasterSnapshotLayer
+        enabled: true
+        topic: /local_costmap/debug/after_obstacle
+        publish_rate: 20.0
       scope_layer:
         plugin: m1_scope_costmap_layer::ScopeLayer
         enabled: false
@@ -301,12 +308,25 @@ local_costmap:
         uncertainty_gain: 0.5
         uncertainty_encoding_scale: 0.5
         medium_cost: 200
+        # Phase 6C: a t+0.2 s forecast is soft MPPI risk, not a timeless
+        # lethal collision wall across the 1.943 s controller horizon.
+        temporal_prediction_hard_obstacle: false
         stale_timeout: 0.5
+      scope_snapshot:
+        plugin: m1_scope_costmap_layer::MasterSnapshotLayer
+        enabled: true
+        topic: /local_costmap/debug/after_scope
+        publish_rate: 20.0
       inflation_layer:
         plugin: nav2_costmap_2d::InflationLayer
         cost_scaling_factor: 3.0
         # Keep a small cost buffer around observed obstacles.
         inflation_radius: 0.4
+      master_snapshot:
+        plugin: m1_scope_costmap_layer::MasterSnapshotLayer
+        enabled: true
+        topic: /local_costmap/debug/after_inflation
+        publish_rate: 20.0
       always_send_full_costmap: true
 
 global_costmap:

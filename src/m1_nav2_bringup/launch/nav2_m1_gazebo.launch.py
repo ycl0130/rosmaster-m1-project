@@ -207,6 +207,9 @@ def generate_launch_description():
     controller_server = Node(
         package="nav2_controller",
         executable="controller_server",
+        # Empty in production.  A controller-only debug wrapper keeps ASan
+        # out of the SCOPE Python/Torch process.
+        prefix=LaunchConfiguration("controller_prefix"),
         name="controller_server",
         output="screen",
         parameters=[configured_params],
@@ -409,6 +412,9 @@ def generate_launch_description():
             default_value=EnvironmentVariable(
                 "M1_SCOPE_MODEL_PATH", default_value="scope_model.pth")),
         DeclareLaunchArgument("scope_device", default_value="cuda"),
+        DeclareLaunchArgument(
+            "controller_prefix",
+            default_value=EnvironmentVariable("M1_CONTROLLER_PREFIX", default_value="")),
         DeclareLaunchArgument("scope_num_samples", default_value="4"),
         DeclareLaunchArgument("scope_sequence_horizon_steps", default_value="2"),
         DeclareLaunchArgument("scope_evaluator_enabled", default_value="false"),
